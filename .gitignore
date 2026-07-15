@@ -1,0 +1,48 @@
+# --- Secrets / credentials (NEVER commit) ---
+.env
+.env.*
+!.env.example
+# Google Cloud service-account key(s)
+steel-prism-*.json
+*-service-account*.json
+
+# --- Runtime data (regenerated; also holds scraped PII) ---
+instance/
+*.db
+*.db.bak-*
+*.sqlite
+*.sqlite3
+
+# --- App run outputs (regenerated; contain real contact PII) ---
+top_contacts.json
+contact_search_results.json
+contact_dossier.json
+x_contact_search_results.json
+x_contact_dossier.json
+x_top_contacts.json
+
+# --- Python ---
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# --- Per-recipient searcher profiles (distributed individually, never shared) ---
+# The engine + base.py + the _example.py template are committed; real profiles
+# are handed to each recipient separately and kept local.
+searcher_profiles/*.py
+!searcher_profiles/__init__.py
+!searcher_profiles/base.py
+!searcher_profiles/_example.py
+
+# --- Internal design docs (not shared) ---
+docs/

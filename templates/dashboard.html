@@ -1,0 +1,114 @@
+{% extends "layout.html" %}
+
+{% block content %}
+<div class="app-layout">
+
+  <!-- LEFT PANEL: Map + Search Controls -->
+  <div class="left-panel">
+
+    <div id="map"></div>
+
+    <div class="search-controls">
+      <h3>Search Controls</h3>
+
+      <div class="field-group">
+        <label for="primary-type-input">Primary Type(s)</label>
+        <div class="multi-select" id="primary-type-selector">
+          <div class="multi-select-tags" id="selected-primary-types"></div>
+          <input type="text" id="primary-type-input" placeholder="Search Google place types...">
+          <div class="multi-select-menu hidden" id="primary-type-suggestions"></div>
+        </div>
+        <p class="field-help">
+          Choose one or more valid Google primary types.
+          <a href="https://developers.google.com/maps/documentation/places/web-service/place-types" target="_blank" rel="noopener noreferrer">View Google primary type list</a>
+        </p>
+      </div>
+
+      <label>Radius (mi)
+        <div class="radius-row">
+          <input type="number" id="radius-num" value="5" min="1" max="50">
+          <input type="range" id="radius-slider" min="1" max="50" value="5">
+        </div>
+      </label>
+
+      <label>Max Results
+        <input type="number" id="max-results" value="25" min="1" max="100">
+      </label>
+
+      <fieldset>
+        <legend>Field Mask</legend>
+        <label><input type="checkbox" name="field" value="displayName" checked> Name</label>
+        <label><input type="checkbox" name="field" value="formattedAddress" checked> Address</label>
+        <label><input type="checkbox" name="field" value="websiteUri" checked> Website</label>
+        <label><input type="checkbox" name="field" value="nationalPhoneNumber" checked> Phone</label>
+        <label><input type="checkbox" name="field" value="types" checked> Types</label>
+      </fieldset>
+
+      <div class="search-buttons">
+        <button id="search-btn">Search</button>
+        <button id="clear-btn" class="btn-secondary">Clear</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT PANEL: Filters + Table + Detail Drawer -->
+  <div class="right-panel">
+
+    <!-- Filters -->
+    <div class="filters-bar">
+      <label>Status
+        <select id="filter-status">
+          <option value="">All</option>
+          <option value="New">New</option>
+          <option value="Qualified">Qualified</option>
+          <option value="Contacted">Contacted</option>
+          <option value="Not a fit">Not a fit</option>
+        </select>
+      </label>
+      <label>Enriched
+        <select id="filter-enriched">
+          <option value="">All</option>
+          <option value="true">Yes</option>
+          <option value="false">No</option>
+        </select>
+      </label>
+      <label>Search
+        <input type="text" id="filter-text" placeholder="Filter by name...">
+      </label>
+      <button id="enrich-all-btn" class="btn-secondary">Enrich All Visible</button>
+      <span id="enrich-status" class="enrich-status-msg"></span>
+    </div>
+
+    <!-- Results Table -->
+    <div class="table-wrapper">
+      <table id="business-table">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Address</th>
+            <th>Website</th>
+            <th>Status</th>
+            <th>Enriched?</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="business-tbody">
+          <tr><td colspan="6" class="empty-msg">Run a search to see results.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="pagination" id="pagination"></div>
+
+    <!-- Detail Drawer -->
+    <div id="detail-drawer" class="detail-drawer hidden">
+      <button id="drawer-close" class="drawer-close">✕</button>
+      <div id="drawer-content"></div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Toast container -->
+<div id="toast-container"></div>
+{% endblock %}
