@@ -121,11 +121,11 @@ The same code runs locally and on Railway; environment variables decide which.
 | --- | --- | --- |
 | `APP_ENV` | unset (development) | `production` |
 | Database | SQLite in `instance/` | Postgres via `DATABASE_URL` |
-| Server | `python app.py` | gunicorn (see `railway.json`) |
+| Server | `python app.py` | `gunicorn main:app` (settings in `gunicorn.conf.py`) |
 | `APP_PASSWORD` | unset | optional shared password |
 
-`railway.json` runs `flask db upgrade` before each deploy and starts gunicorn
-with a 300s timeout (contact discovery and dossier requests are slow). Required
+`gunicorn.conf.py` applies database migrations at startup (production only) and
+sets a 300s timeout (contact discovery and dossier requests are slow). Required
 Railway variables: the four provider keys, `SECRET_KEY`, `APP_ENV=production`,
 `SHOW_SEARCHER_PICKER=true`, and `DATABASE_URL=${{Postgres.DATABASE_URL}}`.
 
