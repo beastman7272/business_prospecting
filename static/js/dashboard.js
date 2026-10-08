@@ -788,9 +788,40 @@ function renderDossier(contactId, d) {
 }
 
 // ── Boot ───────────────────────────────────────────────────────────────────
+async function initSearcherPicker() {
+  let data;
+  try {
+    const resp = await fetch("/api/searchers");
+    data = await resp.json();
+  } catch (err) { return; }
+  if (!data || !data.show_picker) return;
+  const wrap = document.getElementById("searcher-picker");
+  const sel = document.getElementById("searcher-select");
+  if (!wrap || !sel) return;
+  sel.innerHTML = (data.searchers || [])
+    .map(s => `<option value="${s.id}"${s.id === data.active ? " selected" : ""}>${escapeHtml(s.name)}</option>`)
+    .join("");
+  wrap.classList.remove("hidden");
+  sel.addEventListener("change", async () => {
+    try {
+      const resp = await fetch("/api/searchers/active", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ searcher: sel.value }),
+      });
+      const d = await resp.json();
+      if (!resp.ok) throw new Error(d.error || "Could not switch searcher");
+      showToast(`Now prospecting as ${sel.options[sel.selectedIndex].textContent}`, "success");
+    } catch (err) {
+      showToast(err.message, "error");
+    }
+  });
+}
+
 document.addEventListener("DOMContentLoaded", async () => {
   initMap();
   initPrimaryTypeSelector();
+  initSearcherPicker();
   try {
     await loadPlaceTypeOptions();
   } catch (err) {

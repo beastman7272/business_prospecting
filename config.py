@@ -24,6 +24,10 @@ class BaseConfig:
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     BRAVE_SEARCH_API_KEY = os.getenv("BRAVE_SEARCH_API_KEY")
 
+    # Show the in-app "active searcher" picker. For multi-profile users
+    # (e.g. a printer with several lens profiles). Off by default.
+    SHOW_SEARCHER_PICKER = os.getenv("SHOW_SEARCHER_PICKER", "false").lower() in ("1", "true", "yes", "on")
+
 
 class DevConfig(BaseConfig):
     DEBUG = True

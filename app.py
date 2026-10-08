@@ -18,6 +18,14 @@ def create_app():
     app.register_blueprint(main_bp)
     app.register_blueprint(api_bp)
 
+    @app.before_request
+    def _bind_active_searcher():
+        from flask import session
+        from active_profile import set_active_searcher
+        set_active_searcher(
+            session.get("searcher") if app.config.get("SHOW_SEARCHER_PICKER") else None
+        )
+
     return app
 
 if __name__ == "__main__":

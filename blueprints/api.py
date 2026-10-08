@@ -229,3 +229,36 @@ def _intel_dict(i) -> dict:
         "potential_pain_points": i.potential_pain_points,
         "outreach_angle":        i.outreach_angle,
     }
+
+
+# ── Searcher picker (gated by SHOW_SEARCHER_PICKER) ───────────────────────────
+
+@api_bp.get("/searchers")
+def api_searchers():
+    from flask import current_app
+    from searcher_profiles import SEARCHER_PROFILES
+    from active_profile import get_active_profile
+    show = bool(current_app.config.get("SHOW_SEARCHER_PICKER"))
+    try:
+        active = get_active_profile().searcher_id
+    except Exception:
+        active = None
+    searchers = sorted(
+        ({"id": p.searcher_id, "name": p.display_name} for p in SEARCHER_PROFILES.values()),
+        key=lambda s: s["name"],
+    )
+    return jsonify({"show_picker": show, "active": active, "searchers": searchers})
+
+
+@api_bp.post("/searchers/active")
+def api_set_searcher():
+    from flask import current_app, session
+    from searcher_profiles import SEARCHER_PROFILES
+    if not current_app.config.get("SHOW_SEARCHER_PICKER"):
+        return jsonify({"error": "Searcher picker is disabled."}), 403
+    data = request.get_json(silent=True) or {}
+    sid = data.get("searcher")
+    if sid not in SEARCHER_PROFILES:
+        return jsonify({"error": f"Unknown searcher {sid!r}."}), 400
+    session["searcher"] = sid
+    return jsonify({"ok": True, "active": sid})

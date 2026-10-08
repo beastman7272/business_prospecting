@@ -455,5 +455,21 @@ for _sid, _new_roles in _EXECUTIVE_ADDITIONS.items():
             _inv.append(_rk)
 
 
+_PROCUREMENT_ADDITIONS: dict[str, list[str]] = {
+    # Corporate/enterprise purchasing gatekeeper -- the vendor-approval buyer
+    # for print, fulfillment, IT, supplies, etc. (Government/education already
+    # list procurement_officer natively.)
+    "corporate_office": ["procurement_officer"],
+    "manufacturing_industrial": ["procurement_officer"],
+    "healthcare_hospital": ["procurement_officer"],
+    "retail_chain_location": ["procurement_officer"],
+}
+for _sid, _new_roles in _PROCUREMENT_ADDITIONS.items():
+    _inv = SEGMENTS[_sid].role_inventory
+    for _rk in _new_roles:
+        if _rk not in _inv:
+            _inv.append(_rk)
+
+
 def get_segment(segment_id: str) -> TargetSegment | None:
     return SEGMENTS.get(segment_id)
