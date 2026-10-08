@@ -49,8 +49,8 @@ python -c "import roles; print(sorted(roles.ROLES))"            # valid role key
 python -c "import target_segments as t; print(sorted(t.SEGMENTS))"  # valid segments
 ```
 
-Real profile modules are **gitignored** — only `base.py`, `__init__.py`, and
-`_example.py` are committed. Each user is given only their own profile file.
+All profile modules are committed and ship with the app. On the hosted version,
+set `SHOW_SEARCHER_PICKER=true` so each user picks their profile in the UI.
 
 ## Setup
 
@@ -112,6 +112,24 @@ active_profile.py       selects the active searcher
 run_discovery.py        CLI entry point
 migrations/             Alembic migrations
 ```
+
+## Hosted deployment (Railway)
+
+The same code runs locally and on Railway; environment variables decide which.
+
+| | Local | Railway |
+| --- | --- | --- |
+| `APP_ENV` | unset (development) | `production` |
+| Database | SQLite in `instance/` | Postgres via `DATABASE_URL` |
+| Server | `python app.py` | gunicorn (see `railway.json`) |
+| `APP_PASSWORD` | unset | optional shared password |
+
+`railway.json` runs `flask db upgrade` before each deploy and starts gunicorn
+with a 300s timeout (contact discovery and dossier requests are slow). Required
+Railway variables: the four provider keys, `SECRET_KEY`, `APP_ENV=production`,
+`SHOW_SEARCHER_PICKER=true`, and `DATABASE_URL=${{Postgres.DATABASE_URL}}`.
+
+Before a release, run migrations against both SQLite and Postgres.
 
 ## Notes
 

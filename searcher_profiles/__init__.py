@@ -7,10 +7,9 @@ discovers whatever profile modules are physically present and registers them --
 no hardcoded imports -- so the registry reflects exactly the profiles in THIS
 checkout, and adding one never requires editing this file.
 
-Distribution model: real profile modules are gitignored. The shared repo ships
-only the engine (base.py) and a template (_example.py); each recipient is given
-just their own profile file to drop in here. Modules named "base" or starting
-with "_" (like _example.py) are skipped.
+All profile modules are committed and ship with the app (the hosted version
+lets each user pick theirs). Modules named "base" or starting with "_" (like
+_example.py) are skipped.
 """
 
 from __future__ import annotations

@@ -36,13 +36,5 @@ Thumbs.db
 .idea/
 .vscode/
 
-# --- Per-recipient searcher profiles (distributed individually, never shared) ---
-# The engine + base.py + the _example.py template are committed; real profiles
-# are handed to each recipient separately and kept local.
-searcher_profiles/*.py
-!searcher_profiles/__init__.py
-!searcher_profiles/base.py
-!searcher_profiles/_example.py
-
 # --- Internal design docs (not shared) ---
 docs/
