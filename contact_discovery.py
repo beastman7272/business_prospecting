@@ -501,25 +501,58 @@ def rank(
 # Optional own-domain page fetch (lazy import so fetch_and_extract isn't required)
 # -----------------------------------------------------------------------------
 
-def fetch_own_domain_pages(company, raw_results, fetcher, max_pages=5, per_page_chars=6000):
+# Pages on a small business's own site that usually name its people. Fetched
+# directly from the known website, so discovery still reads the site when no
+# own-domain page ranks in the search results (common for small firms).
+OWN_DOMAIN_SEED_PATHS = ("", "about", "about-us", "team", "our-team", "contact")
+
+
+def _own_domain_seed_urls(company) -> list[str]:
+    from urllib.parse import urljoin, urlparse
+    base = (company.website or "").strip()
+    if not base:
+        dom = normalize_domain(company.domain)
+        if not dom:
+            return []
+        base = f"https://{dom}"
+    if "://" not in base:
+        base = "https://" + base
+    parsed = urlparse(base)
+    root = f"{parsed.scheme}://{parsed.netloc}/"
+    return [urljoin(root, p) for p in OWN_DOMAIN_SEED_PATHS]
+
+
+def fetch_own_domain_pages(company, raw_results, fetcher, max_pages=8, per_page_chars=6000):
     dom = normalize_domain(company.domain)
     if not dom:
         return [], []
     urls, seen = [], set()
-    for r in raw_results:
-        if _get_domain(r.url) == dom and r.url not in seen:
-            seen.add(r.url)
-            urls.append(r.url)
+    # Own-domain pages surfaced by search first (they matched a role query),
+    # then the seed pages on the known website.
+    candidates = [r.url for r in raw_results if _get_domain(r.url) == dom]
+    candidates += _own_domain_seed_urls(company)
+    for url in candidates:
+        key = url.rstrip("/").lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        urls.append(url)
         if len(urls) >= max_pages:
             break
     if not urls:
         return [], []
     fetched = fetcher.fetch_many(urls)
-    page_results = [
-        SearchResult(title=fr.title or "", url=fr.final_url or fr.url,
-                     snippet=fr.text[:per_page_chars], query="(own-domain page fetch)")
-        for fr in fetched if fr.ok and fr.text
-    ]
+    page_results, seen_final = [], set()
+    for fr in fetched:
+        if not (fr.ok and fr.text):
+            continue
+        final = (fr.final_url or fr.url).rstrip("/").lower()
+        if final in seen_final:      # e.g. /about-us redirecting to /about
+            continue
+        seen_final.add(final)
+        page_results.append(SearchResult(
+            title=fr.title or "", url=fr.final_url or fr.url,
+            snippet=fr.text[:per_page_chars], query="(own-domain page fetch)"))
     return page_results, fetched
 
 
@@ -536,7 +569,7 @@ def discover_contacts(
     max_results_per_query: int = 5,
     fetch_own_domain: bool = False,
     page_fetcher=None,
-    max_own_domain_pages: int = 5,
+    max_own_domain_pages: int = 8,
     per_page_chars: int = 6000,
 ) -> DiscoveryRun:
     segment, warnings = resolve_segment(company, chain_check_fn=chain_check_fn)
@@ -569,8 +602,7 @@ def discover_contacts(
         if page_results:
             raw_candidates += extractor.extract(company, segment, play, page_results)
         else:
-            warnings.append("own-domain page fetch enabled but no readable "
-                            "own-domain pages were found in the search results.")
+            warnings.append("Couldn't read any pages on the company's own website.")
 
     consolidated = consolidate(raw_candidates)
     ranked = rank(consolidated, play, company_domain=company.domain)

@@ -148,6 +148,14 @@ def discover_and_save_contacts(biz: Business) -> dict:
     )
 
     saved = _upsert_contacts(biz, run.candidates)
+    pages_ok = sum(1 for p in run.fetched_pages if p.get("ok"))
+    current_app.logger.warning(
+        "discovery business=%s searcher=%s segment=%s queries=%d search_results=%d "
+        "own_site_pages=%d/%d candidates=%d warnings=%s",
+        biz.id, run.searcher_used, run.segments_used, len(run.queries),
+        len(run.raw_results), pages_ok, len(run.fetched_pages),
+        len(run.candidates), run.warnings,
+    )
     return {
         "segments_used": run.segments_used,
         "warnings": run.warnings,
