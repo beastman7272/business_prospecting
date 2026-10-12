@@ -610,6 +610,12 @@ async function discoverContacts(businessId, btn) {
     const resp = await fetch(`/api/businesses/${businessId}/discover-contacts`, { method: "POST" });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || "Discovery failed");
+    if (data.skipped_reason && !(data.contacts || []).length) {
+      document.getElementById("contacts-list").innerHTML =
+        `<p class="empty-msg">${escapeHtml(data.skipped_reason)}</p>`;
+      showToast("Skipped: profile doesn't target this business type", "info");
+      return;
+    }
     renderContacts(data.contacts || []);
     (data.warnings || []).forEach(w => showToast(`⚠ ${w}`, "info"));
     showToast(`Found ${data.count ?? "?"} contacts`, "success");

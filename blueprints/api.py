@@ -164,6 +164,7 @@ def api_discover_contacts(business_id):
         "business_id": biz.id,
         "segments_used": result["segments_used"],
         "warnings": result["warnings"],
+        "skipped_reason": result.get("skipped_reason"),
         "contacts": [contact_summary(c) for c in contacts],
         "count": len(contacts),
     })

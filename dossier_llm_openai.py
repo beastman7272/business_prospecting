@@ -211,6 +211,19 @@ OUTREACH_SCHEMA = _obj(
 # Prompt building
 # -----------------------------------------------------------------------------
 
+_FIRST_NAME_ONLY_NOTE = (
+    "Only this person's FIRST name is known. First establish their full name "
+    "from public business sources (the company's own pages, state business "
+    "registration, chamber/association listings, press, the business's posts "
+    "or review replies) and cite where you found it; then search for them by "
+    "full name. If the full name can't be established, say so.\n"
+)
+
+
+def _first_name_only(contact) -> bool:
+    return len([t for t in (contact.name or "").split() if t.strip(".,")]) == 1
+
+
 def _seller_block(seller: SellerContext | None) -> str:
     """Who the outreach is for. Without it, 'relevant' defaults to a generic
     B2B rep, which is how dossiers ended up describing the prospect's
@@ -357,6 +370,9 @@ open a cold conversation.
   about the person's role (e.g. "founded the firm in 2016").
 - EXCLUDE personal-life details (hobbies, pets, family) -- a separate step
   handles self-published personal details.
+- If only a first name was known and a business source gives the person's
+  FULL name, state it as a fact (e.g. "Full name: Hannah X, per the Georgia
+  business filing") with its source and identity level.
 - identity (required for every fact):
     "confirmed" = the source ties this name to THIS company (e.g. the company
                   site, or a page naming both);
@@ -624,7 +640,9 @@ class OpenAIWebPersonSearch(PersonSearch):
             "- articles, interviews, podcasts, talks, awards, association involvement;\n"
             "- business listings or review pages that quote or reply as them.\n"
             "Do NOT use people-search, background-check or data-broker sites, and skip "
-            "pages about other people with the same name.\n\n"
+            "pages about other people with the same name.\n"
+            + (_FIRST_NAME_ONLY_NOTE if _first_name_only(contact) else "")
+            + "\n"
             "Answer as a plain list, one line per page (up to 15), each line citing exactly "
             "that page: what it shows about the person, any date, and whether it is clearly "
             "this person or only possibly. If you find nothing reliable, say so."

@@ -306,6 +306,55 @@ def main():
     check("social prompt uses the company acronym",
           any('"ACE"' in i for i in fc3.responses.inputs))
 
+    print("\nFirst-name-only contact, placeholder email, skipped business type")
+    from fetch_and_extract import extract_contacts
+    from contact_dossier import collect_evidence
+    from contact_discovery import discover_contacts, MockSearchProvider
+    from searcher_profiles import get_profile
+    salon = CompanyInput(canonical_name="L\u2019Amour Nail Boutique", input_name="x",
+                         city="Duluth", state="GA", places_type="nail_salon",
+                         website="https://www.lamournailboutique.com/",
+                         domain="lamournailboutique.com")
+    hannah = ContactCandidate(name="Hannah", title="Founder", company=salon.canonical_name)
+    qs = build_research_queries(hannah, salon, 5)
+    check("first-name-only queries are anchored on the business",
+          all("Amour Nail Boutique" in q for _, q in qs) and not any(q.strip() == '"Hannah"' for _, q in qs),
+          "; ".join(q for _, q in qs))
+    check("curly apostrophe normalised for quoted search", all("\u2019" not in q for _, q in qs))
+
+    class SalonSearch(SearchProvider):
+        def search(self, q, max_results=5):
+            return [SearchResult("Hannah Smith - Realtor", "https://www.linkedin.com/in/hannah-smith", "", q),
+                    SearchResult("L'Amour Nail Boutique | LinkedIn", "https://www.linkedin.com/company/lamour", "", q)]
+    class NoFetch:
+        def fetch(self, url): return FetchResult(url=url, ok=False, error="http_404")
+    ev = collect_evidence(hannah, salon, search=SalonSearch(), get_page=NoFetch().fetch, max_queries=5)
+    li = next(q for q in ev.query_log if q["purpose"] == "linkedin")
+    check("without a surname, namesakes are filtered by the business name",
+          li["dropped_namesakes"] == 1 and li["results"] == 2, str(li))
+
+    found = extract_contacts('<footer>Email: email@example.com  Call (678) 243-5009</footer>')
+    check("template email@example.com dropped, phone kept",
+          found["emails"] == [] and found["phones"] == ["(678) 243-5009"], str(found))
+    from contact_dossier import find_emails
+    check("reach regex ignores placeholder emails",
+          find_emails("write to email@example.com or info@lamour.com") == ["info@lamour.com"])
+
+    os.environ["SEARCHER"] = "photographer"
+    run = discover_contacts(salon, get_profile("photographer"), MockSearchProvider(), None)
+    check("photographer profile skips nail salons (by design) with a clear warning",
+          not run.candidates and any("does not target segment" in w for w in run.warnings))
+    dealer = CompanyInput(canonical_name="Duluth Motors", input_name="x", city="Duluth",
+                          state="GA", places_type="car_dealer")
+    from contact_discovery import resolve_segment, resolve_play
+    seg, _ = resolve_segment(dealer)
+    play, _ = resolve_play(get_profile("photographer"), seg)
+    check("photographer profile now covers car dealerships",
+          play is not None and play.roles[0].role.key == "marketing_director",
+          seg.segment_id)
+    check("seller description no longer says only tech/finance/law",
+          "dealership" in get_profile("photographer").description)
+
     ok = all(checks)
     print(f"\n{sum(checks)}/{len(checks)} checks passed")
     return 0 if ok else 1

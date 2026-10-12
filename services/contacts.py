@@ -170,10 +170,22 @@ def discover_and_save_contacts(biz: Business) -> dict:
         len(run.raw_results), pages_ok, len(run.fetched_pages),
         len(run.candidates), run.warnings,
     )
+    # The active searcher profile deliberately skips this kind of business
+    # (e.g. the photographer profile and nail salons): say so plainly instead
+    # of an empty list that invites clicking Discover again.
+    skipped_reason = None
+    if not run.queries and any("does not target segment" in w for w in run.warnings):
+        segment = (run.segments_used or ["this kind of business"])[0]
+        skipped_reason = (
+            f"The active profile ({run.searcher_used}) doesn't target "
+            f"{segment.replace('_', ' ')} businesses, so no contacts were sought. "
+            f"Switch profiles or add this business type to the profile to search it."
+        )
     return {
         "segments_used": run.segments_used,
         "warnings": run.warnings,
         "contacts": saved,
+        "skipped_reason": skipped_reason,
     }
 
 

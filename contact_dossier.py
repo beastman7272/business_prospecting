@@ -48,7 +48,7 @@ from contact_discovery import (
     _get_domain,
     _own_domain_seed_urls,
 )
-from fetch_and_extract import PageFetcher
+from fetch_and_extract import PageFetcher, is_placeholder_email
 from active_profile import get_active_profile
 from searcher_profiles.base import effective_play
 from roles import search_terms
@@ -455,7 +455,7 @@ def parse_name(name: str) -> tuple[str, str]:
 
 
 def find_emails(text: str) -> list[str]:
-    return EMAIL_RE.findall(text or "")
+    return [e for e in EMAIL_RE.findall(text or "") if not is_placeholder_email(e)]
 
 
 def find_phones(text: str) -> list[str]:
@@ -637,11 +637,31 @@ def build_research_queries(
     Identity is NOT assumed for any result -- the LLM steps disambiguate.
     """
     first, last = parse_name(contact.name)
-    person = (f'"{first.title()} {last.title()}"' if first and last
-              else f'"{contact.name}"')
-    co = company.canonical_name
+    # Curly apostrophes (Places data: "L’Amour") don't match pages that use
+    # a plain one inside a quoted phrase.
+    co = company.canonical_name.replace("\u2019", "'").replace("\u2018", "'")
     city, state = (company.city or "").strip(), (company.state or "").strip()
     profession = _profession_terms(contact, company)
+
+    if first and not last:
+        # Only a first name is known (e.g. a salon team page listing "Hannah,
+        # Founder"). Searching "Hannah" alone returns namesakes, so anchor
+        # every query on the business and use the first name as a hint;
+        # the web-search pass is asked to find the full name.
+        fn = first.title()
+        role = (contact.title or "owner").strip()
+        queries = [
+            ("identity", f'"{co}" {fn} {role}'),
+            ("career", f'"{co}" {city} owner OR founder'.strip()),
+            ("local", f'"{co}" "{city}" {state} {fn}'.strip()),
+            ("social", f'"{co}" site:facebook.com'),
+            ("linkedin", f'"{co}" {fn} site:linkedin.com'),
+            ("content", f'"{co}" {fn} interview OR feature OR article'),
+        ]
+        return queries[:max(1, max_queries)]
+
+    person = (f'"{first.title()} {last.title()}"' if first and last
+              else f'"{contact.name}"')
 
     queries: list[tuple[str, str]] = [("identity", f'{person} "{co}"')]
     if profession:
@@ -692,6 +712,9 @@ class ThrottledSearchProvider(SearchProvider):
 # Query purposes that are purely about the person: results that don't even
 # contain the surname are dropped as namesakes/noise.
 _NAME_REQUIRED_PURPOSES = {"linkedin", "social", "local"}
+_GENERIC_CO_WORDS = {"company", "group", "services", "service", "solutions",
+                     "associates", "partners", "studio", "boutique", "the",
+                     "and", "inc", "llc", "corp", "center", "centre"}
 
 
 # Words in a link's text/path that suggest a page about the firm's people.
@@ -895,6 +918,11 @@ def collect_evidence(
         return new
 
     surname = parse_name(contact.name)[1]
+    # Without a surname, "is this about our person?" falls back to "does it
+    # mention the business?" -- its most distinctive word.
+    co_words = sorted((w for w in re.findall(r"[a-z0-9']+", company.canonical_name.lower())
+                       if len(w) > 3 and w not in _GENERIC_CO_WORDS), key=len, reverse=True)
+    must_contain = surname or (co_words[0] if co_words else "")
     if search is not None and max_queries > 0:
         for purpose, q in build_research_queries(contact, company, max_queries):
             err = None
@@ -904,12 +932,12 @@ def collect_evidence(
                 batch, err = [], str(ex)
                 warnings.append(f"search failed ({purpose}): {ex}")
             raw = len(batch)
-            if purpose in _NAME_REQUIRED_PURPOSES and surname:
+            if purpose in _NAME_REQUIRED_PURPOSES and must_contain:
                 # These queries are only about the person; an engine that
                 # ignores the quotes (Brave returned eight "Steven Wilson"
                 # LinkedIn profiles for "Steven Tison") just adds noise.
                 batch = [r for r in batch
-                         if surname in f"{r.title} {r.url} {r.snippet}".lower()]
+                         if must_contain in f"{r.title} {r.url} {r.snippet}".lower()]
             new = absorb(batch, purpose, search_engine_name)
             query_log.append({"engine": search_engine_name, "purpose": purpose,
                               "query": q, "results": raw, "new": new,

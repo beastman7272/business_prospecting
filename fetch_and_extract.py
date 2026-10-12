@@ -264,6 +264,27 @@ _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 _PHONE_RE = re.compile(r"(?:\+?1[\s.\-]?)?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}")
 # Asset filenames like logo@2x.png look like emails to a regex.
 _NOT_EMAIL_TLDS = {"png", "jpg", "jpeg", "gif", "webp", "svg", "css", "js", "ico"}
+# Website-template placeholders (a Squarespace salon site listed
+# "email@example.com" as its contact address).
+_PLACEHOLDER_EMAIL_DOMAINS = {"example.com", "example.org", "example.net",
+                              "domain.com", "yourdomain.com", "mydomain.com",
+                              "website.com", "yourwebsite.com", "email.com",
+                              "company.com", "yourcompany.com", "sentry.io",
+                              "wixpress.com", "sentry-next.wixpress.com"}
+_PLACEHOLDER_EMAIL_LOCALS = {"you", "your", "yourname", "name", "user",
+                             "username", "email", "youremail", "test"}
+
+
+def is_placeholder_email(email: str) -> bool:
+    """True for template/demo addresses that aren't a real way to reach anyone."""
+    e = (email or "").strip().lower()
+    if "@" not in e:
+        return True
+    local, domain = e.rsplit("@", 1)
+    return (domain in _PLACEHOLDER_EMAIL_DOMAINS
+            or any(domain.endswith("." + d) for d in _PLACEHOLDER_EMAIL_DOMAINS)
+            or (local in _PLACEHOLDER_EMAIL_LOCALS and domain.split(".")[0] in
+                {"domain", "example", "company", "website", "email"}))
 
 
 def extract_contacts(html: str) -> dict:
@@ -279,7 +300,8 @@ def extract_contacts(html: str) -> dict:
 
     def add_email(e: str) -> None:
         e = e.strip().strip(".").lower()
-        if e and e.rsplit(".", 1)[-1] not in _NOT_EMAIL_TLDS and e not in emails:
+        if (e and e.rsplit(".", 1)[-1] not in _NOT_EMAIL_TLDS
+                and not is_placeholder_email(e) and e not in emails):
             emails.append(e)
 
     def add_phone(p: str) -> None:
