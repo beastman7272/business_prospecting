@@ -17,6 +17,7 @@ call is isolated in ``_complete`` so parsing/mapping can be tested offline.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from contact_dossier import (
@@ -30,11 +31,13 @@ from contact_dossier import (
     OutreachAngle,
     OutreachBrief,
     SellerContext,
+    PersonSearch,
     Doc,
     ContactCandidate,
     CompanyInput,
     _now,
 )
+from contact_discovery import SearchResult
 
 DEFAULT_MODEL = "gpt-5.5"
 
@@ -556,3 +559,131 @@ Return JSON matching the schema.
             channel=data.get("channel", ""),
             tone=data.get("tone", ""),
         )
+
+
+# -----------------------------------------------------------------------------
+# Open-web person search (OpenAI hosted web_search tool)
+# -----------------------------------------------------------------------------
+
+_MD_LINK_RE = re.compile(r"\(\[[^\]]*\]\([^)]*\)\)|\[([^\]]*)\]\([^)]*\)")
+
+
+def _field(obj, name, default=None):
+    """Attribute-or-key access: SDK objects in production, dicts in tests."""
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
+class OpenAIWebPersonSearch(PersonSearch):
+    """
+    One agentic web search per dossier using OpenAI's hosted ``web_search``
+    tool -- the same kind of search that found Steven Tison's Facebook group
+    posts when Brave's index returned nothing.
+
+    Provenance rule: only URLs the model actually CITED (``url_citation``
+    annotations attached by the tool) become results; any URL that appears
+    only in the model's prose is ignored. The snippet is the model's own
+    one-line note for that citation, so downstream steps treat it like any
+    search snippet: identity and relevance are still checked, and pages are
+    fetched (unless denylisted, e.g. Facebook/LinkedIn) before being relied on.
+    """
+    engine = "openai_web"
+
+    def __init__(self, client: Any | None = None, model: str = DEFAULT_MODEL,
+                 max_output_tokens: int = 8000, max_results: int = 15):
+        self._client = client
+        self.model = model
+        self.max_output_tokens = max_output_tokens
+        self.max_results = max_results
+
+    def _get_client(self):
+        if self._client is None:
+            from openai import OpenAI
+            self._client = OpenAI()
+        return self._client
+
+    def _prompt(self, contact, company, seller) -> str:
+        return (
+            _seller_block(seller)
+            + f"Research this person on the public web for a cold-outreach dossier:\n"
+            f"- name: {contact.name}\n"
+            f"- title: {contact.title or 'unknown'}\n"
+            f"- company: {company.canonical_name} ({company.website or company.domain or 'no website'})\n"
+            f"- location: {company.city}, {company.state}\n\n"
+            "Find distinct public pages about THIS person (not namesakes), especially:\n"
+            "- their own posts or introductions in local community / business groups "
+            "(Facebook groups, Nextdoor, chamber pages), and their LinkedIn profile;\n"
+            "- past and current employers (staff directories, firm bios), licenses or "
+            "credentials, education;\n"
+            "- articles, interviews, podcasts, talks, awards, association involvement;\n"
+            "- business listings or review pages that quote or reply as them.\n"
+            "Do NOT use people-search, background-check or data-broker sites, and skip "
+            "pages about other people with the same name.\n\n"
+            "Answer as a plain list, one line per page, each line citing exactly that page: "
+            "what it shows about the person, any date, and whether it is clearly this "
+            "person or only possibly. If you find nothing reliable, say so."
+        )
+
+    def _create(self, **kw):
+        """Try the GA tool with the company's area as the search location, then
+        without the location, then the older preview tool name -- API versions
+        differ in what they accept. Raises the last error if all fail."""
+        responses = self._get_client().responses
+        loc = {k: v for k, v in (getattr(self, "_loc", None) or {}).items() if v}
+        attempts = []
+        if len(loc) > 2:
+            attempts.append({"type": "web_search", "user_location": loc})
+        attempts += [{"type": "web_search"}, {"type": "web_search_preview"}]
+        last: Exception | None = None
+        for tool in attempts:
+            try:
+                return responses.create(tools=[tool], **kw)
+            except Exception as ex:
+                last = ex
+                msg = str(ex).lower()
+                if "401" in msg or "api key" in msg or "429" in msg:
+                    break               # auth/rate problems won't fix themselves
+        raise last
+
+    def find(self, contact, company, seller=None) -> list[SearchResult]:
+        self._loc = {"type": "approximate", "country": "US",
+                     "city": company.city or None, "region": company.state or None}
+        try:
+            resp = self._create(model=self.model,
+                                input=self._prompt(contact, company, seller),
+                                max_output_tokens=self.max_output_tokens)
+        except Exception as ex:
+            raise DossierLLMError(f"OpenAI web search failed: {ex}") from ex
+        return self._results_from(resp)
+
+    def _results_from(self, resp) -> list[SearchResult]:
+        out: list[SearchResult] = []
+        seen: set[str] = set()
+        for item in _field(resp, "output", None) or []:
+            if _field(item, "type") != "message":
+                continue
+            for part in _field(item, "content", None) or []:
+                text = _field(part, "text", "") or ""
+                for ann in _field(part, "annotations", None) or []:
+                    if _field(ann, "type") != "url_citation":
+                        continue
+                    url = (_field(ann, "url", "") or "").split("?utm_", 1)[0]
+                    if not url or url in seen:
+                        continue
+                    seen.add(url)
+                    start = _field(ann, "start_index", 0) or 0
+                    line_start = text.rfind("\n", 0, start) + 1
+                    line_end = text.find("\n", start)
+                    line = text[line_start: line_end if line_end >= 0 else len(text)]
+                    note = _MD_LINK_RE.sub(lambda m: m.group(1) or "", line)
+                    note = note.strip(" -*•\t")
+                    out.append(SearchResult(
+                        title=_field(ann, "title", "") or url,
+                        url=url,
+                        snippet=f"(web-search note) {note}"[:600],
+                        query="(openai web search)",
+                    ))
+                    if len(out) >= self.max_results:
+                        return out
+        return out

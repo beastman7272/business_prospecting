@@ -25,6 +25,7 @@ Design choices carried from the handoff:
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import asdict
 
@@ -47,7 +48,7 @@ from contact_dossier import (
     SpineEngagementResearcher,
     ThrottledSearchProvider,
 )
-from dossier_llm_openai import OpenAIDossierLLM
+from dossier_llm_openai import OpenAIDossierLLM, OpenAIWebPersonSearch
 from fetch_and_extract import PageFetcher
 
 
@@ -115,6 +116,18 @@ def _search_provider() -> BraveSearchProvider:
 
 def _extractor() -> GeminiExtractor:
     return GeminiExtractor(current_app.config.get("GEMINI_API_KEY"))
+
+
+def _person_search() -> OpenAIWebPersonSearch | None:
+    """Open-web search run alongside Brave for dossiers. On by default; set
+    DOSSIER_WEB_SEARCH=off to run Brave-only (e.g. to compare engines)."""
+    flag = (current_app.config.get("DOSSIER_WEB_SEARCH")
+            or os.environ.get("DOSSIER_WEB_SEARCH", "on"))
+    if str(flag).strip().lower() in ("0", "off", "false", "no"):
+        return None
+    from openai import OpenAI
+    client = OpenAI(api_key=current_app.config.get("OPENAI_API_KEY"))
+    return OpenAIWebPersonSearch(client=client)
 
 
 def _dossier_llm() -> OpenAIDossierLLM:
@@ -211,7 +224,8 @@ def contact_to_candidate(contact: Contact) -> ContactCandidate:
 def build_and_save_dossier(contact: Contact) -> Dossier:
     """
     Run Stage 3 for a chosen contact and persist the dossier. Providers: Brave
-    (multi-query research search, paced for the free tier's 1 query/second),
+    (multi-query research search, paced for the free tier's 1 query/second)
+    plus an OpenAI open-web search (DOSSIER_WEB_SEARCH=off disables it),
     OpenAI DossierLLM, shared PageFetcher, and the default (controlled)
     SpineEngagementResearcher. The seller context comes from the active
     searcher profile. Commit left to caller.
@@ -232,6 +246,7 @@ def build_and_save_dossier(contact: Contact) -> Dossier:
         fetcher=fetcher,
         llm=llm,
         engagement_researcher=engagement,
+        person_search=_person_search(),
     )
 
     contact.selected = True

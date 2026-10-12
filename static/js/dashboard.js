@@ -822,9 +822,11 @@ function renderDossier(contactId, d) {
 
   const queries = log.queries || [];
   const pagesRead = (log.own_site_pages || []).filter(p => p.ok).length;
+  const attr = (log.attribution || {}).counts || {};
+  const attrText = Object.entries(attr).map(([k, v]) => `${k.replace(/_/g, " ")} ${v}`).join(", ");
   const logHtml = queries.length
-    ? `<p class="research-log" title="${escapeHtml(queries.map(q => `${q.purpose}: ${q.query} (${q.results})`).join("\n"))}">
-         Researched with ${queries.length} search${queries.length === 1 ? "" : "es"} (${log.search_results ?? 0} unique results) and ${pagesRead} page${pagesRead === 1 ? "" : "s"} of the company site${log.seller ? ` · for ${escapeHtml(log.seller)} profile` : ""}.</p>`
+    ? `<p class="research-log" title="${escapeHtml(queries.map(q => `${q.engine || "brave"} · ${q.purpose}: ${q.query} (${q.results})`).join("\n"))}">
+         Researched with ${queries.length} search${queries.length === 1 ? "" : "es"} (${log.search_results ?? 0} unique results) and ${pagesRead} page${pagesRead === 1 ? "" : "s"} of the company site${log.seller ? ` · for ${escapeHtml(log.seller)} profile` : ""}.${attrText ? ` Findings came from: ${escapeHtml(attrText)}.` : ""}</p>`
     : "";
 
   panel.innerHTML = `

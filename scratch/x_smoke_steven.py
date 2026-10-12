@@ -11,7 +11,9 @@ ChatGPT deep-dive found, and saves the full JSON to
 scratch/out/steven_dossier.json so it can be reviewed afterwards.
 
 Expect roughly 1-2 minutes: 5 Brave searches paced at ~1/second for the free
-tier, a few polite page fetches, and 7 OpenAI calls (some run in parallel).
+tier, one OpenAI web search (runs alongside), a few polite page fetches, and
+7 more OpenAI calls (some run in parallel). Add --brave-only to skip the web
+search and compare.
 """
 
 import json
@@ -28,7 +30,7 @@ from contact_discovery import BraveSearchProvider, CompanyInput, ContactCandidat
 from contact_dossier import (
     SpineEngagementResearcher, ThrottledSearchProvider, build_dossier, dossier_to_dict,
 )
-from dossier_llm_openai import OpenAIDossierLLM
+from dossier_llm_openai import OpenAIDossierLLM, OpenAIWebPersonSearch
 from fetch_and_extract import PageFetcher
 
 HOME = "https://accountingconsultantexperts.com/"
@@ -81,7 +83,12 @@ def show(d):
         print(f"- {o_.claim}")
     print("\n=== RESEARCH LOG ===")
     for q in d.research_log.get("queries", []):
-        print(f"- {q['purpose']:9} {q['results']:2} results ({q['new']} new)  {q['query']}" + (f"  ERROR {q['error']}" if q["error"] else ""))
+        print(f"- {q.get('engine', 'brave'):10} {q['purpose']:10} {q['results']:2} results ({q['new']} new)  {q['query']}" + (f"  ERROR {q['error']}" if q["error"] else ""))
+    print("\nSearch results (engine -> url):")
+    for r in d.research_log.get("results", []):
+        print(f"  {'+'.join(r['engines']):18} {r['url']}")
+    att = d.research_log.get("attribution", {})
+    print("\nWhere kept findings came from:", att.get("counts"))
     for p in d.research_log.get("own_site_pages", []):
         print(f"- own site: {'read' if p['ok'] else 'skip'}  {p['url']}  {p['reason']}")
     if d.warnings:
@@ -95,7 +102,8 @@ def score(d):
     for label, ok in (
         ("Facebook group activity surfaced", "facebook.com" in json.dumps([e.url for e in d.engagement]).lower()),
         ("CBT CPA history found (flagged as probable/possible)",
-         any("cbt" in (f.source_url + f.claim).lower() for f in d.background)),
+         any(w in (f.source_url + f.claim).lower()
+             for f in d.background for w in ("cbtcpa", "carmichael", "brasher", "tuvell"))),
         ("Cooper / music / travel captured as rapport",
          any(w in json.dumps([h.detail for h in d.rapport]).lower() for w in ("cooper", "music", "travel"))),
         ("Outreach brief has 2+ cited angles", d.outreach is not None and len(d.outreach.angles) >= 2),
@@ -115,10 +123,12 @@ def main():
     fetcher = PageFetcher()
     llm = OpenAIDossierLLM()
     t0 = time.time()
+    web = None if "--brave-only" in sys.argv else OpenAIWebPersonSearch()
     d = build_dossier(contact, company, search=search, fetcher=fetcher, llm=llm,
                       engagement_researcher=SpineEngagementResearcher(search, fetcher, llm),
-                      min_seniority=0)
-    print(f"Built in {time.time() - t0:.0f}s with {search.calls} Brave calls.")
+                      person_search=web, min_seniority=0)
+    print(f"Built in {time.time() - t0:.0f}s with {search.calls} Brave calls"
+          f"{' and 1 OpenAI web search' if web else ' (Brave only)'}.")
     show(d)
     score(d)
     os.makedirs(os.path.dirname(OUT), exist_ok=True)

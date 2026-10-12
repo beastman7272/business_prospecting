@@ -760,8 +760,15 @@ def crawl_own_site(
             return
         seen_final.add(final)
         seen.add(final)
-        docs.append(Doc(fr.final_url or url,
-                        focus_text(fr.text, contact.name, per_page_chars),
+        text = focus_text(fr.text, contact.name, per_page_chars)
+        # Footer/contact-link details the main-text extractor strips.
+        found = getattr(fr, "contacts", None) or {}
+        extra = [x for x in (found.get("emails") or []) + (found.get("phones") or [])
+                 if x.lower() not in text.lower()]
+        if extra:
+            text += "\n[Contact details elsewhere on this page (header/footer/links): " + \
+                    "; ".join(extra) + "]"
+        docs.append(Doc(fr.final_url or url, text,
                         fr.fetched_at, "own_domain_page", "own_site"))
 
     first_wave = [e.get("url", "") for e in contact.evidence
@@ -795,17 +802,45 @@ def crawl_own_site(
     return docs, log
 
 
+class PersonSearch(ABC):
+    """
+    A broader, engine-driven search for one person (e.g. an LLM with a hosted
+    web-search tool), run ALONGSIDE the query-by-query SearchProvider. Brave's
+    index proved thin for small local firms and community Facebook groups
+    (Steven Tison: 0 results for his own name + company), so this widens
+    recall. It returns ordinary SearchResults -- only URLs the engine actually
+    cited -- which then go through the same identity/relevance checks as
+    everything else. Nothing it returns is trusted on its own.
+    """
+    engine: str = "person_search"
+
+    @abstractmethod
+    def find(self, contact: ContactCandidate, company: CompanyInput,
+             seller: SellerContext | None = None) -> list[SearchResult]: ...
+
+
+class MockPersonSearch(PersonSearch):
+    engine = "mock_web"
+
+    def __init__(self, results: list[SearchResult] | None = None):
+        self._results = results or []
+
+    def find(self, contact, company, seller=None):
+        return list(self._results)
+
+
 @dataclass
 class Evidence:
     """Everything the research phase gathered, shared by every track."""
     own_docs: list[Doc]
     snippet_docs: list[Doc]
-    results: list[SearchResult]           # deduped across queries
+    results: list[SearchResult]           # deduped across queries and engines
     purposes: dict[str, str]              # result url -> query purpose
     linkedin_ref: dict | None
     query_log: list[dict]
     crawl_log: list[dict]
     warnings: list[str]
+    engines: dict[str, list[str]] = field(default_factory=dict)  # norm url -> engines that found it
 
 
 def collect_evidence(
@@ -818,8 +853,16 @@ def collect_evidence(
     results_per_query: int = 8,
     max_own_pages: int = 6,
     per_page_chars: int = 6000,
+    person_search: PersonSearch | None = None,
+    seller: SellerContext | None = None,
+    search_engine_name: str = "brave",
 ) -> Evidence:
     warnings: list[str] = []
+    # The person search is slow (an LLM browsing); start it first and let it
+    # run while the crawl and the paced keyword searches happen.
+    ps_pool = ThreadPoolExecutor(max_workers=1) if person_search else None
+    ps_future = (ps_pool.submit(person_search.find, contact, company, seller)
+                 if ps_pool else None)
     own_docs, crawl_log = crawl_own_site(
         contact, company, get_page,
         max_pages=max_own_pages, per_page_chars=per_page_chars,
@@ -827,26 +870,50 @@ def collect_evidence(
 
     results: list[SearchResult] = []
     purposes: dict[str, str] = {}
-    seen: set[str] = set()
+    engines: dict[str, list[str]] = {}
     query_log: list[dict] = []
-    for purpose, q in build_research_queries(contact, company, max_queries):
-        err = None
-        try:
-            batch = search.search(q, max_results=results_per_query)
-        except Exception as ex:
-            batch, err = [], str(ex)
-            warnings.append(f"search failed ({purpose}): {ex}")
+
+    def absorb(batch, purpose, engine) -> int:
         new = 0
         for r in batch:
             key = _norm_url(r.url)
-            if not key or key in seen:
+            if not key:
                 continue
-            seen.add(key)
+            if key in engines:
+                if engine not in engines[key]:
+                    engines[key].append(engine)
+                continue
+            engines[key] = [engine]
             results.append(r)
             purposes[r.url] = purpose
             new += 1
-        query_log.append({"purpose": purpose, "query": q,
+        return new
+
+    if search is not None and max_queries > 0:
+        for purpose, q in build_research_queries(contact, company, max_queries):
+            err = None
+            try:
+                batch = search.search(q, max_results=results_per_query)
+            except Exception as ex:
+                batch, err = [], str(ex)
+                warnings.append(f"search failed ({purpose}): {ex}")
+            new = absorb(batch, purpose, search_engine_name)
+            query_log.append({"engine": search_engine_name, "purpose": purpose,
+                              "query": q, "results": len(batch), "new": new,
+                              "error": err})
+
+    if ps_future is not None:
+        err = None
+        try:
+            batch = ps_future.result()
+        except Exception as ex:
+            batch, err = [], str(ex)
+            warnings.append(f"web search failed ({person_search.engine}): {ex}")
+        new = absorb(batch, "web_search", person_search.engine)
+        query_log.append({"engine": person_search.engine, "purpose": "web_search",
+                          "query": f"(open web search for {contact.name})",
                           "results": len(batch), "new": new, "error": err})
+        ps_pool.shutdown(wait=False)
 
     first, last = parse_name(contact.name)
     snippet_docs: list[Doc] = []
@@ -861,7 +928,7 @@ def collect_evidence(
             linkedin_ref = {"url": r.url, "snippet": r.snippet}
 
     return Evidence(own_docs, snippet_docs, results, purposes, linkedin_ref,
-                    query_log, crawl_log, warnings)
+                    query_log, crawl_log, warnings, engines)
 
 
 def seller_context_for(company: CompanyInput) -> SellerContext | None:
@@ -1090,6 +1157,36 @@ def run_outreach(contact, company, llm, findings, seller=None) -> OutreachBrief:
     return brief
 
 
+def attribute_findings(evidence: Evidence, company: CompanyInput, background,
+                       engagement, rapport, outreach) -> dict:
+    """
+    Which source produced each item that SURVIVED into the dossier: the
+    company's own site, or which search engine(s). Summed per source plus a
+    per-item list, so after a handful of dossiers it is clear whether an
+    engine is pulling its weight (e.g. whether Brave still finds anything the
+    web search misses).
+    """
+    dom = normalize_domain(company.domain)
+    kept: list[tuple[str, str]] = (
+        [("background", f.source_url) for f in background]
+        + [("engagement", e.url) for e in engagement]
+        + [("rapport", h.source_url) for h in rapport]
+        + [("outreach", u) for a in (outreach.angles if outreach else []) for u in a.evidence]
+    )
+    items, counts = [], {}
+    for section, url in kept:
+        if not url:
+            continue
+        if dom and _get_domain(url) == dom:
+            source = "own_site"
+        else:
+            engines = evidence.engines.get(_norm_url(url), [])
+            source = "+".join(sorted(engines)) if engines else "unknown"
+        counts[source] = counts.get(source, 0) + 1
+        items.append({"section": section, "url": url, "source": source})
+    return {"counts": counts, "items": items}
+
+
 def _engagement_status(items, stats: dict, failed: bool) -> str:
     if failed:
         return "failed"
@@ -1121,6 +1218,8 @@ def build_dossier(
     max_queries: int = 5,           # search budget per dossier (Brave free tier: 1 qps)
     results_per_query: int = 8,
     seller: SellerContext | None = None,
+    person_search: PersonSearch | None = None,
+    search_engine_name: str = "brave",
 ) -> ContactDossier:
     """
     Run the Stage 3 pipeline: research once (own-site crawl + multi-query
@@ -1152,6 +1251,8 @@ def build_dossier(
         contact, company, search=search, get_page=get_page,
         max_queries=max_queries, results_per_query=results_per_query,
         max_own_pages=max_pages, per_page_chars=per_page_chars,
+        person_search=person_search, seller=seller,
+        search_engine_name=search_engine_name,
     )
     warnings.extend(evidence.warnings)
     research_log: dict[str, Any] = {
@@ -1159,6 +1260,13 @@ def build_dossier(
         "queries": evidence.query_log,
         "own_site_pages": evidence.crawl_log,
         "search_results": len(evidence.results),
+        # Every search result (capped), with which engine(s) returned it, so a
+        # dossier can be audited and the engines compared over time.
+        "results": [
+            {"url": r.url, "title": r.title, "purpose": evidence.purposes.get(r.url, ""),
+             "engines": evidence.engines.get(_norm_url(r.url), [])}
+            for r in evidence.results[:80]
+        ],
     }
     if not evidence.own_docs:
         warnings.append("could not read any page on the company's own website")
@@ -1253,6 +1361,9 @@ def build_dossier(
         outreach = run_outreach(contact, company, llm, findings, seller=seller)
     except Exception as ex:
         warnings.append(f"outreach synthesis failed: {ex}")
+
+    research_log["attribution"] = attribute_findings(
+        evidence, company, background, engagement, rapport, outreach)
 
     return ContactDossier(
         contact=contact, company=company, gate=gate,

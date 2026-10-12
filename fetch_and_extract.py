@@ -129,6 +129,10 @@ class FetchResult:
     # BEFORE nav/header/footer are stripped, so a caller can follow a site's
     # own navigation (e.g. "Meet Steven" -> /about). Not part of `text`.
     links: list[dict] = field(default_factory=list)
+    # Emails/phones found ANYWHERE on the page -- mailto:/tel: links and the
+    # visible text of header/footer, which `text` strips. Small-business sites
+    # often list their only email in the footer.
+    contacts: dict = field(default_factory=dict)
     fetched_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -254,6 +258,54 @@ def extract_links(html: str, base_url: str, max_links: int = 300) -> list[dict]:
         if len(out) >= max_links:
             break
     return out
+
+
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+_PHONE_RE = re.compile(r"(?:\+?1[\s.\-]?)?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}")
+# Asset filenames like logo@2x.png look like emails to a regex.
+_NOT_EMAIL_TLDS = {"png", "jpg", "jpeg", "gif", "webp", "svg", "css", "js", "ico"}
+
+
+def extract_contacts(html: str) -> dict:
+    """
+    Emails and phone numbers from the whole page: mailto:/tel: hrefs plus the
+    visible text of every element (including header/footer/nav, which the
+    main-text extractor removes). Returns {"emails": [...], "phones": [...]},
+    deduped, in page order. Never raises.
+    """
+    from urllib.parse import unquote
+    emails: list[str] = []
+    phones: list[str] = []
+
+    def add_email(e: str) -> None:
+        e = e.strip().strip(".").lower()
+        if e and e.rsplit(".", 1)[-1] not in _NOT_EMAIL_TLDS and e not in emails:
+            emails.append(e)
+
+    def add_phone(p: str) -> None:
+        digits = re.sub(r"\D", "", p)[-10:]
+        if len(digits) == 10 and digits not in {re.sub(r"\D", "", x)[-10:] for x in phones}:
+            phones.append(p.strip())
+
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, "html.parser")
+        for a in soup.find_all("a", href=True):
+            href = a["href"].strip()
+            if href.lower().startswith("mailto:"):
+                add_email(unquote(href[7:].split("?", 1)[0]))
+            elif href.lower().startswith("tel:"):
+                add_phone(unquote(href[4:]))
+        for tag in soup(["script", "style", "noscript", "template", "svg"]):
+            tag.decompose()
+        visible = soup.get_text(" ")
+    except Exception:
+        visible = re.sub(r"<[^>]+>", " ", html)
+    for m in _EMAIL_RE.findall(visible):
+        add_email(m)
+    for m in _PHONE_RE.findall(visible):
+        add_phone(m)
+    return {"emails": emails[:20], "phones": phones[:20]}
 
 
 def extract_main_text(html: str) -> tuple[str | None, str]:
@@ -431,6 +483,7 @@ class PageFetcher:
         result.title = title
         result.text = text
         result.links = extract_links(html, result.final_url or url)
+        result.contacts = extract_contacts(html)
         result.ok = True
         return result
 

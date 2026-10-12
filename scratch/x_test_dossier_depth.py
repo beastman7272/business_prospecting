@@ -21,7 +21,7 @@ os.environ["SEARCHER"] = "photographer"
 from contact_discovery import CompanyInput, ContactCandidate, SearchResult, SearchProvider
 from fetch_and_extract import FetchResult, extract_links
 from contact_dossier import (
-    BackgroundFact, EngagementItem, MockDossierLLM, OutreachAngle, OutreachBrief,
+    BackgroundFact, EngagementItem, MockDossierLLM, MockPersonSearch, OutreachAngle, OutreachBrief,
     PersonSignals, RapportHook, SpineEngagementResearcher, ThrottledSearchProvider,
     build_dossier, build_research_queries, dossier_to_dict, focus_text,
 )
@@ -85,8 +85,10 @@ class StubFetcher:
         if url not in PAGES:
             return FetchResult(url=url, ok=False, error="http_404")
         title, text, links = PAGES[url]
+        contacts = {"emails": ["steven@accountingconsultantexperts.com"],
+                    "phones": ["(470) 253-4381"]} if url == HOME else {}
         return FetchResult(url=url, ok=True, final_url=url, status_code=200,
-                           title=title, text=text, links=links)
+                           title=title, text=text, links=links, contacts=contacts)
 
 
 CONTACT = ContactCandidate(
@@ -153,11 +155,27 @@ def main():
     )
     search = FixtureSearch()
     fetcher = StubFetcher()
+    FB2 = "https://www.facebook.com/groups/2315634442007751/posts/4582759321961907/"
+    web = MockPersonSearch([
+        SearchResult("Flowery Branch group", FB2, "(web-search note) Steven promotes ACE bookkeeping", "w"),
+        SearchResult("Staff", "https://www.cbtcpa.com/staffnew.php", "(web-search note) staff page", "w"),
+    ])
     d = build_dossier(CONTACT, COMPANY, search=search, fetcher=fetcher, llm=llm,
                       engagement_researcher=SpineEngagementResearcher(search, fetcher, llm),
-                      min_seniority=0)
+                      person_search=web, min_seniority=0)
 
     check("ran 5 searches", len(search.queries) == 5)
+    by_url = {r["url"]: r["engines"] for r in d.research_log["results"]}
+    check("web-search-only result tracked as mock_web", by_url.get(FB2) == ["mock_web"], str(by_url.get(FB2)))
+    check("result found by both engines tracked as both",
+          by_url.get("https://www.cbtcpa.com/staffnew.php") == ["brave", "mock_web"])
+    check("web search logged as its own query row",
+          any(q["engine"] == "mock_web" and q["results"] == 2 for q in d.research_log["queries"]))
+    att = d.research_log["attribution"]["counts"]
+    check("kept findings attributed by source",
+          att.get("own_site", 0) >= 1 and att.get("brave+mock_web", 0) >= 1, str(att))
+    check("footer email reaches the evidence",
+          any("steven@accountingconsultantexperts.com" in doc.text for doc in llm.seen["reach"]))
     own_urls = [doc.url for doc in llm.seen["background"] if doc.source_type == "own_domain_page"]
     check("crawl read homepage + followed the site's Contact link",
           HOME in own_urls and HOME + "contact-us" in own_urls, str(own_urls))
@@ -235,6 +253,35 @@ def main():
         for s in (dlo.BACKGROUND_SCHEMA["properties"]["facts"]["items"],
                   dlo.RAPPORT_SCHEMA["properties"]["hooks"]["items"],
                   dlo.OUTREACH_SCHEMA, dlo.OUTREACH_SCHEMA["properties"]["angles"]["items"])))
+
+    print("\nOpenAI web search parsing (fake response)")
+    resp = {"output": [
+        {"type": "web_search_call"},
+        {"type": "message", "content": [{"type": "output_text",
+         "text": "- Steven introduces ACE in a Duluth group, 2024 ([facebook.com](https://facebook.com/groups/1/posts/2))\n- Unrelated https://made-up.example.com",
+         "annotations": [{"type": "url_citation", "url": "https://facebook.com/groups/1/posts/2?utm_source=openai",
+                          "title": "Duluth Business Group", "start_index": 50, "end_index": 90}]}]},
+    ]}
+    rs = dlo.OpenAIWebPersonSearch(client=object())._results_from(resp)
+    check("only cited URLs become results", [r.url for r in rs] == ["https://facebook.com/groups/1/posts/2"],
+          str([r.url for r in rs]))
+    check("snippet is the cited line, markdown link stripped",
+          rs and "Duluth group, 2024" in rs[0].snippet and "](" not in rs[0].snippet, rs[0].snippet if rs else "")
+
+    class FailingResponses:
+        def __init__(self): self.tools = []
+        def create(self, tools, **kw):
+            self.tools.append(tools[0]["type"])
+            if tools[0]["type"] != "web_search_preview":
+                raise ValueError("400 unsupported tool")
+            return {"output": []}
+    class FC2:
+        def __init__(self): self.responses = FailingResponses()
+    fc2 = FC2()
+    ws = dlo.OpenAIWebPersonSearch(client=fc2)
+    ws.find(CONTACT, COMPANY)
+    check("falls back through tool variants", fc2.responses.tools ==
+          ["web_search", "web_search", "web_search_preview"], str(fc2.responses.tools))
 
     ok = all(checks)
     print(f"\n{sum(checks)}/{len(checks)} checks passed")
