@@ -689,6 +689,11 @@ class ThrottledSearchProvider(SearchProvider):
             return self.inner.search(query, max_results=max_results)
 
 
+# Query purposes that are purely about the person: results that don't even
+# contain the surname are dropped as namesakes/noise.
+_NAME_REQUIRED_PURPOSES = {"linkedin", "social", "local"}
+
+
 # Words in a link's text/path that suggest a page about the firm's people.
 _PERSON_PAGE_WORDS = ("about", "team", "meet", "story", "bio", "staff",
                       "founder", "leadership", "people", "who-we-are",
@@ -889,6 +894,7 @@ def collect_evidence(
             new += 1
         return new
 
+    surname = parse_name(contact.name)[1]
     if search is not None and max_queries > 0:
         for purpose, q in build_research_queries(contact, company, max_queries):
             err = None
@@ -897,10 +903,17 @@ def collect_evidence(
             except Exception as ex:
                 batch, err = [], str(ex)
                 warnings.append(f"search failed ({purpose}): {ex}")
+            raw = len(batch)
+            if purpose in _NAME_REQUIRED_PURPOSES and surname:
+                # These queries are only about the person; an engine that
+                # ignores the quotes (Brave returned eight "Steven Wilson"
+                # LinkedIn profiles for "Steven Tison") just adds noise.
+                batch = [r for r in batch
+                         if surname in f"{r.title} {r.url} {r.snippet}".lower()]
             new = absorb(batch, purpose, search_engine_name)
             query_log.append({"engine": search_engine_name, "purpose": purpose,
-                              "query": q, "results": len(batch), "new": new,
-                              "error": err})
+                              "query": q, "results": raw, "new": new,
+                              "dropped_namesakes": raw - len(batch), "error": err})
 
     if ps_future is not None:
         err = None

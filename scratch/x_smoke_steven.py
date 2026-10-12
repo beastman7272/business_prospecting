@@ -128,7 +128,7 @@ def main():
                       engagement_researcher=SpineEngagementResearcher(search, fetcher, llm),
                       person_search=web, min_seniority=0)
     print(f"Built in {time.time() - t0:.0f}s with {search.calls} Brave calls"
-          f"{' and 1 OpenAI web search' if web else ' (Brave only)'}.")
+          f"{' and 2 OpenAI web searches (general + social)' if web else ' (Brave only)'}.")
     show(d)
     score(d)
     os.makedirs(os.path.dirname(OUT), exist_ok=True)

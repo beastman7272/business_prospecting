@@ -591,11 +591,16 @@ class OpenAIWebPersonSearch(PersonSearch):
     engine = "openai_web"
 
     def __init__(self, client: Any | None = None, model: str = DEFAULT_MODEL,
-                 max_output_tokens: int = 8000, max_results: int = 15):
+                 max_output_tokens: int = 8000, max_results: int = 15,
+                 social_pass: bool = True):
         self._client = client
         self.model = model
         self.max_output_tokens = max_output_tokens
         self.max_results = max_results
+        # A second, narrower call aimed only at posts in community/social
+        # groups. The broad call tends to stop at a few authoritative pages
+        # (own site, staff directories) and never looks in group posts.
+        self.social_pass = social_pass
 
     def _get_client(self):
         if self._client is None:
@@ -620,9 +625,31 @@ class OpenAIWebPersonSearch(PersonSearch):
             "- business listings or review pages that quote or reply as them.\n"
             "Do NOT use people-search, background-check or data-broker sites, and skip "
             "pages about other people with the same name.\n\n"
-            "Answer as a plain list, one line per page, each line citing exactly that page: "
-            "what it shows about the person, any date, and whether it is clearly this "
-            "person or only possibly. If you find nothing reliable, say so."
+            "Answer as a plain list, one line per page (up to 15), each line citing exactly "
+            "that page: what it shows about the person, any date, and whether it is clearly "
+            "this person or only possibly. If you find nothing reliable, say so."
+        )
+
+    def _social_prompt(self, contact, company) -> str:
+        words = [w for w in re.split(r"[\s&,.-]+", company.canonical_name) if w]
+        acronym = "".join(w[0] for w in words).upper() if len(words) >= 2 else ""
+        alias = f' or "{acronym}"' if acronym else ""
+        return (
+            f"Search social media and community sites for public posts or comments BY "
+            f"{contact.name}, who runs \"{company.canonical_name}\"{alias} in "
+            f"{company.city}, {company.state}.\n"
+            "Look especially for: posts introducing or promoting the business in local "
+            "Facebook groups (town, neighborhood, small-business or networking groups in "
+            f"{company.city} and nearby towns), Nextdoor posts, LinkedIn posts or profile, "
+            "Instagram, and YouTube.\n"
+            f"Try several searches, e.g. \"{contact.name}\" facebook group; "
+            f"\"{company.canonical_name}\" facebook; \"{contact.name}\" {acronym or company.canonical_name} "
+            f"{company.city}; \"{contact.name}\" linkedin.\n"
+            "Skip people-search/data-broker sites and other people with the same name.\n"
+            "Answer as a plain list, one line per post or profile found, each line citing "
+            "exactly that page: what it says, the group or site, any date, and whether it is "
+            "clearly this person. A post you can only see in search results still counts -- "
+            "cite it and say so. If you find none, say so."
         )
 
     def _create(self, **kw):
@@ -647,15 +674,35 @@ class OpenAIWebPersonSearch(PersonSearch):
         raise last
 
     def find(self, contact, company, seller=None) -> list[SearchResult]:
+        from concurrent.futures import ThreadPoolExecutor
         self._loc = {"type": "approximate", "country": "US",
                      "city": company.city or None, "region": company.state or None}
-        try:
-            resp = self._create(model=self.model,
-                                input=self._prompt(contact, company, seller),
+        prompts = [("general", self._prompt(contact, company, seller))]
+        if self.social_pass:
+            prompts.append(("social", self._social_prompt(contact, company)))
+
+        def run(prompt):
+            return self._create(model=self.model, input=prompt,
                                 max_output_tokens=self.max_output_tokens)
-        except Exception as ex:
-            raise DossierLLMError(f"OpenAI web search failed: {ex}") from ex
-        return self._results_from(resp)
+
+        with ThreadPoolExecutor(max_workers=len(prompts)) as pool:
+            futures = [(label, pool.submit(run, p)) for label, p in prompts]
+        out: list[SearchResult] = []
+        seen: set[str] = set()
+        errors: list[str] = []
+        for label, fut in futures:
+            try:
+                batch = self._results_from(fut.result())
+            except Exception as ex:
+                errors.append(f"{label}: {ex}")
+                continue
+            for r in batch:
+                if r.url not in seen:
+                    seen.add(r.url)
+                    out.append(r)
+        if errors and not out:
+            raise DossierLLMError("OpenAI web search failed: " + "; ".join(errors))
+        return out
 
     def _results_from(self, resp) -> list[SearchResult]:
         out: list[SearchResult] = []

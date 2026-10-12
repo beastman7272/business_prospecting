@@ -59,7 +59,8 @@ RESULTS = {
     "social": [("Steven Tison - Duluth business group",
                 "https://www.facebook.com/groups/2315634442007751/posts/4582589801978859/",
                 "Hi all! I'm Steven and I started ACE, the ace of accounting, here in Duluth.")],
-    "linkedin": [],
+    "linkedin": [("Steven Wilson - Ellucian | LinkedIn",
+                  "https://www.linkedin.com/in/steven-wilson-b58363156/", "Steven Wilson ...")],
 }
 
 
@@ -165,6 +166,9 @@ def main():
                       person_search=web, min_seniority=0)
 
     check("ran 5 searches", len(search.queries) == 5)
+    li = next(q for q in d.research_log["queries"] if q["purpose"] == "linkedin")
+    check("namesake LinkedIn result dropped (Brave ignored the quotes)",
+          li["results"] == 1 and li["new"] == 0 and li["dropped_namesakes"] == 1, str(li))
     by_url = {r["url"]: r["engines"] for r in d.research_log["results"]}
     check("web-search-only result tracked as mock_web", by_url.get(FB2) == ["mock_web"], str(by_url.get(FB2)))
     check("result found by both engines tracked as both",
@@ -278,10 +282,29 @@ def main():
     class FC2:
         def __init__(self): self.responses = FailingResponses()
     fc2 = FC2()
-    ws = dlo.OpenAIWebPersonSearch(client=fc2)
+    ws = dlo.OpenAIWebPersonSearch(client=fc2, social_pass=False)
     ws.find(CONTACT, COMPANY)
     check("falls back through tool variants", fc2.responses.tools ==
           ["web_search", "web_search", "web_search_preview"], str(fc2.responses.tools))
+
+    class TwoCallResponses:
+        def __init__(self): self.inputs = []
+        def create(self, tools, input, **kw):
+            self.inputs.append(input)
+            url = "https://facebook.com/groups/9/posts/1" if "social media" in input else "https://a.com/"
+            return {"output": [{"type": "message", "content": [{"type": "output_text",
+                    "text": "- found it", "annotations": [
+                        {"type": "url_citation", "url": url, "title": "t", "start_index": 2},
+                        {"type": "url_citation", "url": "https://a.com/", "title": "t", "start_index": 2}]}]}]}
+    class FC3:
+        def __init__(self): self.responses = TwoCallResponses()
+    fc3 = FC3()
+    got = dlo.OpenAIWebPersonSearch(client=fc3).find(CONTACT, COMPANY)
+    check("social pass runs as a second call and results are merged/deduped",
+          len(fc3.responses.inputs) == 2 and sorted(r.url for r in got) ==
+          ["https://a.com/", "https://facebook.com/groups/9/posts/1"], str([r.url for r in got]))
+    check("social prompt uses the company acronym",
+          any('"ACE"' in i for i in fc3.responses.inputs))
 
     ok = all(checks)
     print(f"\n{sum(checks)}/{len(checks)} checks passed")
