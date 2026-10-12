@@ -45,6 +45,7 @@ from contact_dossier import (
     build_dossier,
     dossier_to_dict,
     SpineEngagementResearcher,
+    ThrottledSearchProvider,
 )
 from dossier_llm_openai import OpenAIDossierLLM
 from fetch_and_extract import PageFetcher
@@ -210,14 +211,16 @@ def contact_to_candidate(contact: Contact) -> ContactCandidate:
 def build_and_save_dossier(contact: Contact) -> Dossier:
     """
     Run Stage 3 for a chosen contact and persist the dossier. Providers: Brave
-    (freshness search + engagement), OpenAI DossierLLM, shared PageFetcher, and
-    the default (controlled) SpineEngagementResearcher. Commit left to caller.
+    (multi-query research search, paced for the free tier's 1 query/second),
+    OpenAI DossierLLM, shared PageFetcher, and the default (controlled)
+    SpineEngagementResearcher. The seller context comes from the active
+    searcher profile. Commit left to caller.
     """
     biz = contact.business
     company = business_to_company_input(biz)
     candidate = contact_to_candidate(contact)
 
-    search = _search_provider()
+    search = ThrottledSearchProvider(_search_provider(), min_interval=1.1)
     fetcher = PageFetcher()
     llm = _dossier_llm()
     engagement = SpineEngagementResearcher(search, fetcher, llm)
@@ -292,6 +295,7 @@ def _loads(value, default):
 
 
 def dossier_dict(record: Dossier) -> dict:
+    _raw = _loads(record.raw_json, {})
     return {
         "id": record.id,
         "contact_id": record.contact_id,
@@ -306,6 +310,11 @@ def dossier_dict(record: Dossier) -> dict:
         "background": _loads(record.background, []),
         "engagement": _loads(record.engagement, []),
         "org_inferences": _loads(record.org_inferences, []),
+        # Newer sections live only in raw_json (no schema migration needed);
+        # dossiers built before they existed simply return empty values.
+        "rapport": _raw.get("rapport") or [],
+        "outreach": _raw.get("outreach"),
+        "research_log": _raw.get("research_log") or {},
         "warnings": _loads(record.warnings, []),
         "generated_at": record.generated_at,
     }

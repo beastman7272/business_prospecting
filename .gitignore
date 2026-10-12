@@ -38,3 +38,6 @@ Thumbs.db
 
 # --- Internal design docs (not shared) ---
 docs/
+
+# --- Live smoke-test output (real contact data) ---
+scratch/out/

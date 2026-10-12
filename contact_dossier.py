@@ -30,10 +30,13 @@ decision is made.
 from __future__ import annotations
 
 import re
+import time
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 from contact_discovery import (
     CompanyInput,
@@ -43,6 +46,7 @@ from contact_discovery import (
     resolve_segment,
     normalize_domain,
     _get_domain,
+    _own_domain_seed_urls,
 )
 from fetch_and_extract import PageFetcher
 from active_profile import get_active_profile
@@ -64,7 +68,10 @@ class Doc:
     url: str
     text: str
     fetched_at: str | None
-    source_type: str  # own_domain_page | search_snippet | linkedin_snippet
+    # own_domain_page | external_page | search_snippet | social_snippet |
+    # linkedin_snippet
+    source_type: str
+    purpose: str = ""         # which research query surfaced it (identity, career, ...)
 
 
 @dataclass
@@ -83,13 +90,19 @@ class BackgroundFact:
     claim: str
     source_url: str
     date: str | None
-    confidence: str           # high | medium | low
+    confidence: str           # high | medium | low  (is the claim itself right?)
+    # Is this really the same person? confirmed = the source ties the name to
+    # this company; probable = same name + matching profession/area, no company
+    # link; possible = same name, weak match. Only confirmed/probable facts may
+    # feed outreach openers; possible ones surface as open questions.
+    identity: str = "confirmed"
+    identity_note: str = ""
 
 
 @dataclass
 class EngagementItem:
     url: str
-    kind: str                 # post | article | talk | podcast | other
+    kind: str                 # post | article | talk | podcast | group | review | other
     title: str
     date: str | None
     summary: str
@@ -102,6 +115,55 @@ class OrgInference:
     claim: str
     basis: list[str]          # evidence refs (urls); MUST be non-empty to survive
     confidence: str = "low"
+
+
+@dataclass
+class RapportHook:
+    """
+    A personal detail the person CHOSE to publish themselves (their own
+    business site, their own posts) that makes a warm, non-creepy opener --
+    e.g. an office dog, a hobby named in their bio, why they started the firm.
+    Boundary (§5.5): self-published only; never family members, home address,
+    health, politics/religion, or anything from people-search/aggregator sites.
+    """
+    detail: str
+    kind: str                 # pet | hobby | interest | origin_story | community | other
+    source_url: str
+    suggested_use: str = ""
+
+
+@dataclass
+class OutreachAngle:
+    angle: str                # short label, e.g. "New-firm credibility"
+    opener: str               # 1-2 sentences the rep can adapt
+    rationale: str            # why this fits the seller's offer
+    evidence: list[str] = field(default_factory=list)   # source URLs it rests on
+
+
+@dataclass
+class OutreachBrief:
+    """The 'so what': how to open a cold conversation with this person, for
+    THIS seller. Synthesized from the dossier's own findings only."""
+    angles: list[OutreachAngle] = field(default_factory=list)
+    likely_needs: list[str] = field(default_factory=list)   # hypotheses, tied to the offer
+    why_now: str | None = None
+    avoid: list[str] = field(default_factory=list)
+    open_questions: list[str] = field(default_factory=list) # identity doubts / contradictions
+    channel: str = ""          # recommended first channel + why
+    tone: str = ""
+
+
+@dataclass
+class SellerContext:
+    """Who is doing the outreach and what they sell (from the active searcher
+    profile), so the LLM judges 'relevant' as relevant to THIS seller rather
+    than to a generic B2B rep."""
+    searcher_id: str
+    display_name: str
+    description: str
+    sales_rationale: str = ""
+    segment_id: str = ""
+    target_roles: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -122,6 +184,12 @@ class ContactDossier:
     background: list[BackgroundFact] = field(default_factory=list)
     engagement: list[EngagementItem] = field(default_factory=list)
     org_inferences: list[OrgInference] = field(default_factory=list)
+    rapport: list[RapportHook] = field(default_factory=list)
+    outreach: OutreachBrief | None = None
+    # What was searched/crawled and why a section may be empty (queries run,
+    # own-site pages visited, engagement status). Lets "nothing found" be
+    # told apart from "couldn't look".
+    research_log: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     fetched_pages: list[dict] = field(default_factory=list)
     generated_at: str = field(default_factory=_now)
@@ -142,7 +210,10 @@ class PersonSignals:
 
 class DossierLLM(ABC):
     """The LLM-dependent reasoning steps. One interface, many methods, so a
-    single mock can stand in for all of Stage 3's model calls in tests."""
+    single mock can stand in for all of Stage 3's model calls in tests.
+
+    ``seller`` (a SellerContext, may be None) tells the model who the outreach
+    is for, so relevance is judged against the seller's actual offer."""
 
     @abstractmethod
     def detect_person_signals(
@@ -151,7 +222,8 @@ class DossierLLM(ABC):
 
     @abstractmethod
     def extract_background_facts(
-        self, contact: ContactCandidate, company: CompanyInput, documents: list[Doc]
+        self, contact: ContactCandidate, company: CompanyInput, documents: list[Doc],
+        seller: SellerContext | None = None,
     ) -> list[BackgroundFact]: ...
 
     @abstractmethod
@@ -161,7 +233,8 @@ class DossierLLM(ABC):
 
     @abstractmethod
     def summarize_engagement(
-        self, contact: ContactCandidate, company: CompanyInput, documents: list[Doc]
+        self, contact: ContactCandidate, company: CompanyInput, documents: list[Doc],
+        seller: SellerContext | None = None,
     ) -> list[EngagementItem]: ...
 
     @abstractmethod
@@ -169,9 +242,23 @@ class DossierLLM(ABC):
         self, contact: ContactCandidate, company: CompanyInput, evidence: list[Doc]
     ) -> list[OrgInference]: ...
 
+    @abstractmethod
+    def extract_rapport_hooks(
+        self, contact: ContactCandidate, company: CompanyInput, documents: list[Doc],
+        seller: SellerContext | None = None,
+    ) -> list[RapportHook]: ...
+
+    @abstractmethod
+    def synthesize_outreach(
+        self, contact: ContactCandidate, company: CompanyInput, findings: dict,
+        seller: SellerContext | None = None,
+    ) -> OutreachBrief: ...
+
 
 class MockDossierLLM(DossierLLM):
-    """Canned responses for offline development/testing."""
+    """Canned responses for offline development/testing. Records the documents
+    each method was handed (``self.seen``) so tests can assert on what evidence
+    actually reached the model."""
 
     def __init__(
         self,
@@ -180,27 +267,46 @@ class MockDossierLLM(DossierLLM):
         reach: list[ReachValue] | None = None,
         engagement: list[EngagementItem] | None = None,
         org: list[OrgInference] | None = None,
+        rapport: list[RapportHook] | None = None,
+        outreach: OutreachBrief | None = None,
     ):
         self._signals = signals or PersonSignals()
         self._background = background or []
         self._reach = reach or []
         self._engagement = engagement or []
         self._org = org or []
+        self._rapport = rapport or []
+        self._outreach = outreach
+        self.seen: dict[str, Any] = {}
 
     def detect_person_signals(self, contact, company, documents):
+        self.seen["signals"] = documents
         return self._signals
 
-    def extract_background_facts(self, contact, company, documents):
+    def extract_background_facts(self, contact, company, documents, seller=None):
+        self.seen["background"] = documents
+        self.seen["seller"] = seller
         return list(self._background)
 
     def associate_reach(self, contact, company, documents):
+        self.seen["reach"] = documents
         return list(self._reach)
 
-    def summarize_engagement(self, contact, company, documents):
+    def summarize_engagement(self, contact, company, documents, seller=None):
+        self.seen["engagement"] = documents
         return list(self._engagement)
 
     def infer_reporting(self, contact, company, evidence):
+        self.seen["org"] = evidence
         return list(self._org)
+
+    def extract_rapport_hooks(self, contact, company, documents, seller=None):
+        self.seen["rapport"] = documents
+        return list(self._rapport)
+
+    def synthesize_outreach(self, contact, company, findings, seller=None):
+        self.seen["outreach_findings"] = findings
+        return self._outreach or OutreachBrief()
 
 
 # =============================================================================
@@ -217,18 +323,33 @@ class EngagementResearcher(ABC):
 class MockEngagementResearcher(EngagementResearcher):
     def __init__(self, items: list[EngagementItem] | None = None):
         self._items = items or []
+        self.last_stats: dict = {}
+        self.last_docs: list[Doc] = []
 
     def research(self, contact, company, anchors):
+        results = anchors.get("search_results") or []
+        self.last_stats = {"candidates": len(results), "pages_fetched": 0}
         return list(self._items)
 
 
 class SpineEngagementResearcher(EngagementResearcher):
     """
-    Default (controlled) engagement track: scoped search -> fetch -> LLM
-    confirm-identity + summarize. Structure only; the identity/summarize step
-    routes through the DossierLLM seam, so it stays backend-agnostic. A
+    Default (controlled) engagement track: search -> fetch -> LLM
+    confirm-identity + summarize. The identity/summarize step routes through
+    the DossierLLM seam, so it stays backend-agnostic. A
     HostedSearchEngagementResearcher can later implement the same interface and
     be swapped in if the eval shows this one under-recalls.
+
+    When the orchestrator passes ``anchors["search_results"]`` (the pooled,
+    multi-query results from collect_evidence), those are used instead of
+    running a separate query -- the old single query just repeated the gate's.
+    Results on the company's own domain are skipped (the own-site crawl already
+    read them). Social/LinkedIn results are never fetched (the fetcher's
+    denylist) and contribute their search snippet only.
+
+    After ``research`` runs, ``last_docs`` holds the external evidence it
+    gathered (reused by the background/rapport tracks) and ``last_stats`` says
+    how much there was, so an empty result can be explained.
     """
 
     def __init__(
@@ -244,30 +365,55 @@ class SpineEngagementResearcher(EngagementResearcher):
         self.llm = llm
         self.max_pages = max_pages
         self.per_page_chars = per_page_chars
+        self.last_stats: dict = {}
+        self.last_docs: list[Doc] = []
 
     def research(self, contact, company, anchors):
-        title = contact.title or ""
-        query = f'"{contact.name}" "{company.canonical_name}" {title}'.strip()
-        try:
-            results = self.search.search(query, max_results=self.max_pages)
-        except Exception:
-            results = []
+        self.last_stats, self.last_docs = {}, []
+        results = anchors.get("search_results")
+        purposes = anchors.get("purposes") or {}
+        get_page = anchors.get("get_page") or self.fetcher.fetch
+        if results is None:   # legacy/standalone path: one scoped query
+            title = contact.title or ""
+            query = f'"{contact.name}" "{company.canonical_name}" {title}'.strip()
+            try:
+                results = self.search.search(query, max_results=self.max_pages)
+            except Exception:
+                results = []
+
+        dom = normalize_domain(company.domain)
+        external = [r for r in results if not (dom and _get_domain(r.url) == dom)]
+        first, last = parse_name(contact.name)
+
+        def promise(r) -> tuple:
+            blob = f"{r.title} {r.snippet} {r.url}".lower()
+            return (bool(last) and last in blob, bool(first) and first in blob)
 
         docs: list[Doc] = []
-        for r in results[: self.max_pages]:
-            # The fetcher's denylist guarantees LinkedIn etc. are never fetched;
-            # such results contribute their snippet only.
-            fr = self.fetcher.fetch(r.url)
-            if fr.ok and fr.text:
-                docs.append(Doc(fr.final_url or fr.url,
-                                fr.text[: self.per_page_chars],
-                                fr.fetched_at, "search_snippet"))
-            else:
-                docs.append(Doc(r.url, r.snippet, None, "search_snippet"))
+        fetched = 0
+        for r in sorted(external, key=promise, reverse=True):
+            src = snippet_source_type(r.url)
+            purpose = purposes.get(r.url, "")
+            # Only fetch pages that plausibly mention the person; the rest
+            # (and all social/LinkedIn results) contribute their snippet.
+            if src == "search_snippet" and fetched < self.max_pages and promise(r)[0]:
+                fr = get_page(r.url)
+                if fr.ok and fr.text:
+                    fetched += 1
+                    docs.append(Doc(fr.final_url or r.url,
+                                    focus_text(fr.text, contact.name, self.per_page_chars),
+                                    fr.fetched_at, "external_page", purpose))
+                    continue
+            docs.append(Doc(r.url, f"{r.title}\n{r.snippet}".strip(), None, src, purpose))
 
+        self.last_docs = docs
+        self.last_stats = {"candidates": len(external), "pages_fetched": fetched}
+        if not docs:
+            return []
         # Identity confirmation + summarization + relevance filtering all happen
         # inside the LLM step (mandatory disambiguation guard, §5.3).
-        return self.llm.summarize_engagement(contact, company, docs)
+        return self.llm.summarize_engagement(contact, company, docs,
+                                             seller=anchors.get("seller"))
 
 
 # =============================================================================
@@ -383,6 +529,361 @@ def _seniority_score(title: str, target_roles: list[str]) -> int:
 
 
 # =============================================================================
+# Research collection  (§4.2 / §5 -- own-site crawl + multi-query search)
+# =============================================================================
+
+_SOCIAL_HOSTS = ("facebook.com", "instagram.com", "twitter.com", "x.com",
+                 "tiktok.com", "youtube.com", "nextdoor.com")
+
+# Title words too generic to make a useful profession search term.
+_GENERIC_TITLE_WORDS = {
+    "owner", "founder", "cofounder", "co-founder", "president", "ceo", "coo",
+    "cfo", "director", "manager", "partner", "principal", "lead", "senior",
+    "chief", "officer", "of", "and", "the", "&", "/", "-", "vp", "head",
+    "managing", "executive", "general", "associate",
+}
+
+
+def snippet_source_type(url: str) -> str:
+    host = urlparse(url).netloc.lower()
+    if host.endswith("linkedin.com"):
+        return "linkedin_snippet"
+    if any(host == h or host.endswith("." + h) for h in _SOCIAL_HOSTS):
+        return "social_snippet"
+    return "search_snippet"
+
+
+def focus_text(text: str, name: str, budget: int) -> str:
+    """
+    Fit page text into ``budget`` chars WITHOUT losing the parts about the
+    person. Plain head-truncation dropped Steven Tison's bio, which sits ~60%
+    of the way down his firm's one-page site. Keeps the page head (context),
+    then windows around each mention of the person's surname/first name
+    (bios run forward from the name heading, so windows lean forward), joined
+    with an elision marker.
+    """
+    text = text or ""
+    if len(text) <= budget:
+        return text
+    first, last = parse_name(name)
+    low = text.lower()
+    hits: list[int] = []
+    for term in (last, first):
+        if not term or len(term) < 3:
+            continue
+        start = 0
+        while True:
+            i = low.find(term, start)
+            if i < 0:
+                break
+            hits.append(i)
+            start = i + len(term)
+    if not hits:
+        return text[:budget]
+
+    before, after = 300, 1500
+    windows: list[tuple[int, int]] = []
+    for i in sorted(hits):
+        a, b = max(0, i - before), min(len(text), i + after)
+        if windows and a <= windows[-1][1]:
+            windows[-1] = (windows[-1][0], max(windows[-1][1], b))
+        else:
+            windows.append((a, b))
+    window_chars = sum(b - a for a, b in windows)
+    # Spend whatever the name windows don't need on the page head (context).
+    head = max(budget // 5, budget - window_chars - 50)
+    spans = [(0, head)] + windows
+    merged: list[list[int]] = []
+    for a, b in sorted(spans):
+        if merged and a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+
+    sep = "\n[...]\n"
+    out: list[str] = []
+    used = 0
+    for a, b in merged:
+        room = budget - used - (len(sep) if out else 0)
+        if room <= 0:
+            break
+        piece = text[a:min(b, a + room)]
+        out.append(piece)
+        used += len(piece) + (len(sep) if len(out) > 1 else 0)
+    return sep.join(out)
+
+
+def _profession_terms(contact: ContactCandidate, company: CompanyInput) -> str:
+    """A couple of words describing the person's line of work, for a career
+    search ('accounting', 'chiropractor'). Empty if nothing useful."""
+    words: list[str] = []
+    for w in (company.places_type or "").replace("_", " ").split():
+        if w and w not in words:
+            words.append(w)
+    for w in re.split(r"[\s/,&()-]+", (contact.title or "").lower()):
+        if w and w not in _GENERIC_TITLE_WORDS and w not in words and len(w) > 2:
+            words.append(w)
+    return " ".join(words[:3])
+
+
+def build_research_queries(
+    contact: ContactCandidate, company: CompanyInput, max_queries: int = 5,
+) -> list[tuple[str, str]]:
+    """
+    Several differently-anchored searches instead of one narrow one. The old
+    single query ("name" "company" title) can't match a Facebook group post
+    that never names the company, or a past employer's staff page. Returns
+    [(purpose, query)], most important first, capped at ``max_queries``.
+    Identity is NOT assumed for any result -- the LLM steps disambiguate.
+    """
+    first, last = parse_name(contact.name)
+    person = (f'"{first.title()} {last.title()}"' if first and last
+              else f'"{contact.name}"')
+    co = company.canonical_name
+    city, state = (company.city or "").strip(), (company.state or "").strip()
+    profession = _profession_terms(contact, company)
+
+    queries: list[tuple[str, str]] = [("identity", f'{person} "{co}"')]
+    if profession:
+        queries.append(("career", f"{person} {profession}"))
+    if city:
+        queries.append(("local", f'{person} "{city}" {state}'.strip()))
+    queries.append(("social", f"{person} {city or co} site:facebook.com".replace("  ", " ")))
+    queries.append(("linkedin", f"{person} site:linkedin.com"))
+    queries.append(("content", f'{person} "{co}" podcast OR interview OR blog OR article'))
+    return queries[:max(1, max_queries)]
+
+
+class ThrottledSearchProvider(SearchProvider):
+    """
+    Paces calls to a search API and retries once on a rate-limit response.
+    Brave's free tier allows 1 query/second, and a dossier now runs several
+    queries back to back.
+    """
+
+    def __init__(self, inner: SearchProvider, min_interval: float = 1.1,
+                 retry_wait: float = 2.0):
+        self.inner = inner
+        self.min_interval = min_interval
+        self.retry_wait = retry_wait
+        self._last = 0.0
+        self.calls = 0
+
+    def _pace(self) -> None:
+        wait = self.min_interval - (time.monotonic() - self._last)
+        if wait > 0:
+            time.sleep(wait)
+        self._last = time.monotonic()
+
+    def search(self, query: str, max_results: int = 5) -> list[SearchResult]:
+        self._pace()
+        self.calls += 1
+        try:
+            return self.inner.search(query, max_results=max_results)
+        except Exception as ex:
+            if "429" not in str(ex):
+                raise
+            time.sleep(self.retry_wait)
+            self._pace()
+            self.calls += 1
+            return self.inner.search(query, max_results=max_results)
+
+
+# Words in a link's text/path that suggest a page about the firm's people.
+_PERSON_PAGE_WORDS = ("about", "team", "meet", "story", "bio", "staff",
+                      "founder", "leadership", "people", "who-we-are",
+                      "who we are", "our-firm", "principal", "attorney",
+                      "doctor", "provider", "owner")
+
+
+def _norm_url(url: str) -> str:
+    return url.split("#", 1)[0].rstrip("/").lower()
+
+
+def _own_link_score(link: dict, first: str, last: str) -> int:
+    blob = f"{link.get('text') or ''} {urlparse(link.get('href') or '').path}".lower()
+    score = 0
+    if last and last in blob:
+        score += 5
+    if first and first in blob:
+        score += 3
+    if any(w in blob for w in _PERSON_PAGE_WORDS):
+        score += 2
+    if "contact" in blob:
+        score += 1
+    return score
+
+
+def crawl_own_site(
+    contact: ContactCandidate,
+    company: CompanyInput,
+    get_page,
+    *,
+    max_pages: int = 6,
+    per_page_chars: int = 6000,
+) -> tuple[list[Doc], list[dict]]:
+    """
+    Read the company's own site the way a person would: Stage 2's own-domain
+    evidence pages and the homepage first, then the site's own links that look
+    like people pages (scored by the person's name and about/team/meet words),
+    then -- only if the site exposed no such links -- blind guesses at common
+    paths. Each page is focus_text()-ed around the person's name.
+    Returns (docs, crawl_log).
+    """
+    dom = normalize_domain(company.domain)
+    if not dom:
+        return [], []
+    first, last = parse_name(contact.name)
+    seeds = _own_domain_seed_urls(company)           # homepage first
+
+    docs: list[Doc] = []
+    log: list[dict] = []
+    seen: set[str] = set()
+    seen_final: set[str] = set()
+    links: list[dict] = []
+
+    def visit(url: str) -> None:
+        key = _norm_url(url)
+        if not key or key in seen:
+            return
+        seen.add(key)
+        fr = get_page(url.split("#", 1)[0])
+        entry = {"url": url, "ok": bool(fr.ok and fr.text),
+                 "reason": fr.skipped_reason or fr.error or ""}
+        log.append(entry)
+        if not (fr.ok and fr.text):
+            return
+        final = _norm_url(fr.final_url or url)
+        links.extend(getattr(fr, "links", None) or [])
+        if final in seen_final:                      # e.g. /about-us -> /about
+            entry["reason"] = "duplicate_of_visited_page"
+            return
+        seen_final.add(final)
+        seen.add(final)
+        docs.append(Doc(fr.final_url or url,
+                        focus_text(fr.text, contact.name, per_page_chars),
+                        fr.fetched_at, "own_domain_page", "own_site"))
+
+    first_wave = [e.get("url", "") for e in contact.evidence
+                  if e.get("url") and _get_domain(e.get("url", "")) == dom]
+    first_wave += seeds[:1]
+    for u in first_wave:
+        if len(docs) >= max_pages:
+            break
+        visit(u)
+
+    candidates: dict[str, tuple[int, str]] = {}
+    for link in links:
+        href = link.get("href") or ""
+        if _get_domain(href) != dom or _norm_url(href) in seen:
+            continue
+        score = _own_link_score(link, first, last)
+        if score > 0:
+            k = _norm_url(href)
+            if k not in candidates or candidates[k][0] < score:
+                candidates[k] = (score, href)
+    for _, href in sorted(candidates.values(), key=lambda t: -t[0]):
+        if len(docs) >= max_pages:
+            break
+        visit(href)
+
+    if not candidates:
+        for u in seeds[1:]:
+            if len(docs) >= max_pages:
+                break
+            visit(u)
+    return docs, log
+
+
+@dataclass
+class Evidence:
+    """Everything the research phase gathered, shared by every track."""
+    own_docs: list[Doc]
+    snippet_docs: list[Doc]
+    results: list[SearchResult]           # deduped across queries
+    purposes: dict[str, str]              # result url -> query purpose
+    linkedin_ref: dict | None
+    query_log: list[dict]
+    crawl_log: list[dict]
+    warnings: list[str]
+
+
+def collect_evidence(
+    contact: ContactCandidate,
+    company: CompanyInput,
+    *,
+    search: SearchProvider,
+    get_page,
+    max_queries: int = 5,
+    results_per_query: int = 8,
+    max_own_pages: int = 6,
+    per_page_chars: int = 6000,
+) -> Evidence:
+    warnings: list[str] = []
+    own_docs, crawl_log = crawl_own_site(
+        contact, company, get_page,
+        max_pages=max_own_pages, per_page_chars=per_page_chars,
+    )
+
+    results: list[SearchResult] = []
+    purposes: dict[str, str] = {}
+    seen: set[str] = set()
+    query_log: list[dict] = []
+    for purpose, q in build_research_queries(contact, company, max_queries):
+        err = None
+        try:
+            batch = search.search(q, max_results=results_per_query)
+        except Exception as ex:
+            batch, err = [], str(ex)
+            warnings.append(f"search failed ({purpose}): {ex}")
+        new = 0
+        for r in batch:
+            key = _norm_url(r.url)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            results.append(r)
+            purposes[r.url] = purpose
+            new += 1
+        query_log.append({"purpose": purpose, "query": q,
+                          "results": len(batch), "new": new, "error": err})
+
+    first, last = parse_name(contact.name)
+    snippet_docs: list[Doc] = []
+    linkedin_ref: dict | None = None
+    for r in results:
+        src = snippet_source_type(r.url)
+        snippet_docs.append(Doc(r.url, f"{r.title}\n{r.snippet}".strip(), None,
+                                src, purposes.get(r.url, "")))
+        blob = f"{r.title} {r.url}".lower()
+        if (src == "linkedin_snippet" and linkedin_ref is None
+                and last and last in blob and "/in/" in r.url.lower()):
+            linkedin_ref = {"url": r.url, "snippet": r.snippet}
+
+    return Evidence(own_docs, snippet_docs, results, purposes, linkedin_ref,
+                    query_log, crawl_log, warnings)
+
+
+def seller_context_for(company: CompanyInput) -> SellerContext | None:
+    """Build the SellerContext from the active searcher profile and the
+    company's segment. None if no profile resolves (never fatal)."""
+    try:
+        profile = get_active_profile()
+        segment, _ = resolve_segment(company)
+        play = effective_play(profile, segment.segment_id)
+        return SellerContext(
+            searcher_id=profile.searcher_id,
+            display_name=profile.display_name,
+            description=profile.description,
+            sales_rationale=play.sales_rationale if play else "",
+            segment_id=segment.segment_id,
+            target_roles=[rr.role.key for rr in play.roles] if play else [],
+        )
+    except Exception:
+        return None
+
+
+# =============================================================================
 # The gate  (§4 — multi-source, with the short-circuit rule)
 # =============================================================================
 
@@ -430,62 +931,28 @@ def run_gate(
     contact: ContactCandidate,
     company: CompanyInput,
     *,
-    search: SearchProvider,
-    get_page,                       # callable(url) -> FetchResult (cached)
+    evidence: Evidence,
     llm: DossierLLM,
     min_seniority: int = 1,
-    max_pages: int = 5,
-    per_page_chars: int = 6000,
-) -> tuple[GateVerdict, list[Doc], dict | None, list[str]]:
+) -> tuple[GateVerdict, list[str]]:
     """
-    Multi-source gate. Sources (§4.2):
-      1. own-domain pages already in the contact's Stage 2 evidence,
-      2. a targeted freshness search (the only source that can surface a
+    Multi-source gate (§4.2) over the shared research evidence:
+      1. the company's own pages (own-site crawl),
+      2. the multi-query search results (the only source that can surface a
          *departure* signal),
-      3. LinkedIn read-only via snippet (never fetched — denylist enforces it).
-    Returns (verdict, gate_docs, linkedin_ref, warnings). gate_docs are reused
-    downstream so reach/background don't re-fetch.
+      3. LinkedIn read-only via snippet (never fetched -- denylist enforces it).
+    Returns (verdict, warnings).
     """
     warnings: list[str] = []
     segment, _ = resolve_segment(company)
-    # Seniority reference roles now come from the active searcher's ranked play
-    # for this segment (was segment.target_roles, which moved onto the profile).
+    # Seniority reference roles come from the active searcher's ranked play
+    # for this segment.
     _play = effective_play(get_active_profile(), segment.segment_id)
     _role_titles = ([t for rr in _play.roles for t in search_terms(rr.role.key)] if _play
                     else [t for k in segment.role_inventory for t in search_terms(k)])
     seniority = _seniority_score(contact.title or "", _role_titles)
 
-    docs: list[Doc] = []
-
-    # Source 1: own-domain pages from inherited Stage 2 evidence.
-    dom = normalize_domain(company.domain)
-    own_urls: list[str] = []
-    seen: set[str] = set()
-    for e in contact.evidence:
-        u = e.get("url", "")
-        if u and _get_domain(u) == dom and u not in seen:
-            seen.add(u)
-            own_urls.append(u)
-    for u in own_urls[:max_pages]:
-        fr = get_page(u)
-        if fr.ok and fr.text:
-            docs.append(Doc(fr.final_url or u, fr.text[:per_page_chars],
-                            fr.fetched_at, "own_domain_page"))
-
-    # Source 2 + 3: targeted freshness search (+ read-only LinkedIn snippet).
-    title = contact.title or ""
-    query = f'"{contact.name}" "{company.canonical_name}" {title}'.strip()
-    linkedin_ref: dict | None = None
-    try:
-        results = search.search(query, max_results=max_pages)
-    except Exception as ex:
-        results = []
-        warnings.append(f"gate freshness search failed: {ex}")
-    for r in results:
-        src = "linkedin_snippet" if "linkedin.com" in r.url.lower() else "search_snippet"
-        docs.append(Doc(r.url, r.snippet, None, src))
-        if src == "linkedin_snippet" and linkedin_ref is None:
-            linkedin_ref = {"url": r.url, "snippet": r.snippet}
+    docs = evidence.own_docs + evidence.snippet_docs
 
     # A failure here (e.g. a transient API error) must not crash the dossier.
     # Degrade to empty signals -> "uncertain", which PROCEEDS per §4.3, and flag
@@ -510,7 +977,7 @@ def run_gate(
         worth_deepdive=worth,
         rationale=rationale,
     )
-    return verdict, docs, linkedin_ref, warnings
+    return verdict, warnings
 
 
 # =============================================================================
@@ -593,10 +1060,18 @@ def run_reach(
     return out
 
 
-def run_background(contact, company, docs, llm) -> list[BackgroundFact]:
-    """LLM extracts career/tenure/education facts; professional-relevance
-    filtering lives in the prompt (§5.2). Deterministic pass-through here."""
-    return llm.extract_background_facts(contact, company, docs)
+def run_background(contact, company, docs, llm, seller=None) -> list[BackgroundFact]:
+    """LLM extracts facts about the PERSON (career, credentials, how they
+    started); each carries an identity level. Sorted confirmed -> possible."""
+    facts = llm.extract_background_facts(contact, company, docs, seller=seller)
+    order = {"confirmed": 0, "probable": 1, "possible": 2}
+    return sorted(facts, key=lambda f: order.get(f.identity, 3))
+
+
+def run_rapport(contact, company, docs, llm, seller=None) -> list[RapportHook]:
+    """Self-published personal details (§5.5). Uncited hooks are dropped."""
+    hooks = llm.extract_rapport_hooks(contact, company, docs, seller=seller)
+    return [h for h in hooks if h.source_url and h.detail]
 
 
 def run_org_inference(contact, company, evidence, llm) -> list[OrgInference]:
@@ -604,6 +1079,27 @@ def run_org_inference(contact, company, evidence, llm) -> list[OrgInference]:
     inference lacking a concrete evidence basis is dropped."""
     raw = llm.infer_reporting(contact, company, evidence)
     return [o for o in raw if o.basis]
+
+
+def run_outreach(contact, company, llm, findings, seller=None) -> OutreachBrief:
+    """The 'so what' (§5.6): angles, likely needs, why-now, things to avoid and
+    open questions, synthesized from the dossier's findings for this seller.
+    Angles without any cited evidence are dropped."""
+    brief = llm.synthesize_outreach(contact, company, findings, seller=seller)
+    brief.angles = [a for a in brief.angles if a.evidence]
+    return brief
+
+
+def _engagement_status(items, stats: dict, failed: bool) -> str:
+    if failed:
+        return "failed"
+    if items:
+        return "found"
+    if stats.get("candidates") == 0:
+        return "no_results"
+    if stats.get("candidates"):
+        return "filtered"
+    return "unknown"
 
 
 # =============================================================================
@@ -620,12 +1116,17 @@ def build_dossier(
     engagement_researcher: EngagementResearcher,
     min_seniority: int = 1,
     verify_email: bool = False,
-    max_pages: int = 5,
+    max_pages: int = 6,             # cap on own-site pages read
     per_page_chars: int = 6000,
+    max_queries: int = 5,           # search budget per dossier (Brave free tier: 1 qps)
+    results_per_query: int = 8,
+    seller: SellerContext | None = None,
 ) -> ContactDossier:
     """
-    Run the Stage 3 pipeline. Shared page cache across tracks; per-track
-    graceful failure; short-circuit on a non-worth gate verdict.
+    Run the Stage 3 pipeline: research once (own-site crawl + multi-query
+    search), gate, then the tracks over that shared evidence, then the
+    outreach synthesis. Shared page cache; per-track graceful failure;
+    short-circuit on a non-worth gate verdict.
     """
     page_cache: dict[str, Any] = {}
 
@@ -634,40 +1135,63 @@ def build_dossier(
             page_cache[url] = fetcher.fetch(url)
         return page_cache[url]
 
-    warnings: list[str] = []
+    def _pages_dict() -> list[dict]:
+        out = []
+        for fr in page_cache.values():
+            if hasattr(fr, "to_dict"):
+                d = fr.to_dict()
+                d.pop("links", None)          # navigation only; keep raw_json lean
+                out.append(d)
+        return out
 
-    gate, gate_docs, linkedin_ref, gate_warnings = run_gate(
-        contact, company, search=search, get_page=get_page, llm=llm,
-        min_seniority=min_seniority, max_pages=max_pages,
-        per_page_chars=per_page_chars,
+    warnings: list[str] = []
+    if seller is None:
+        seller = seller_context_for(company)
+
+    evidence = collect_evidence(
+        contact, company, search=search, get_page=get_page,
+        max_queries=max_queries, results_per_query=results_per_query,
+        max_own_pages=max_pages, per_page_chars=per_page_chars,
+    )
+    warnings.extend(evidence.warnings)
+    research_log: dict[str, Any] = {
+        "seller": seller.searcher_id if seller else None,
+        "queries": evidence.query_log,
+        "own_site_pages": evidence.crawl_log,
+        "search_results": len(evidence.results),
+    }
+    if not evidence.own_docs:
+        warnings.append("could not read any page on the company's own website")
+
+    gate, gate_warnings = run_gate(
+        contact, company, evidence=evidence, llm=llm, min_seniority=min_seniority,
     )
     warnings.extend(gate_warnings)
-
-    def _pages_dict() -> list[dict]:
-        return [fr.to_dict() for fr in page_cache.values()
-                if hasattr(fr, "to_dict")]
 
     if not gate.worth_deepdive:
         warnings.append(f"short-circuited: {gate.rationale}")
         return ContactDossier(
             contact=contact, company=company, gate=gate,
-            warnings=warnings, fetched_pages=_pages_dict(),
+            research_log=research_log, warnings=warnings,
+            fetched_pages=_pages_dict(),
         )
 
     reach: list[ReachValue] = []
     try:
-        reach = run_reach(contact, company, gate_docs, linkedin_ref, llm,
-                          verify_email=verify_email)
+        reach = run_reach(contact, company, evidence.own_docs, evidence.linkedin_ref,
+                          llm, verify_email=verify_email)
     except Exception as ex:
         warnings.append(f"reach track failed: {ex}")
 
-    background: list[BackgroundFact] = []
-    try:
-        background = run_background(contact, company, gate_docs, llm)
-    except Exception as ex:
-        warnings.append(f"background track failed: {ex}")
+    # Independent LLM calls run concurrently to keep the request well under
+    # the server timeout: org starts now; background + rapport start as soon
+    # as engagement has gathered the external evidence they also read.
+    pool = ThreadPoolExecutor(max_workers=3)
+    org_future = pool.submit(run_org_inference, contact, company,
+                             evidence.own_docs + evidence.snippet_docs, llm)
 
     engagement: list[EngagementItem] = []
+    eng_failed = False
     try:
         anchors = {
             "company": company.canonical_name,
@@ -675,21 +1199,67 @@ def build_dossier(
             "city": company.city,
             "state": company.state,
             "known_urls": [e.get("url", "") for e in contact.evidence],
+            "search_results": evidence.results,
+            "purposes": evidence.purposes,
+            "get_page": get_page,
+            "seller": seller,
         }
         engagement = engagement_researcher.research(contact, company, anchors)
     except Exception as ex:
+        eng_failed = True
         warnings.append(f"engagement track failed: {ex}")
+    stats = dict(getattr(engagement_researcher, "last_stats", {}) or {})
+    research_log["engagement"] = {
+        "status": _engagement_status(engagement, stats, eng_failed), **stats,
+    }
 
-    org: list[OrgInference] = []
+    # External evidence: the engagement researcher's fetched pages + snippets
+    # when available (one fetch, many uses), else the raw search snippets.
+    external_docs = getattr(engagement_researcher, "last_docs", None) or evidence.snippet_docs
+    person_docs = evidence.own_docs + external_docs
+
+    bg_future = pool.submit(run_background, contact, company, person_docs, llm,
+                            seller=seller)
+    rapport_future = pool.submit(run_rapport, contact, company, person_docs, llm,
+                                 seller=seller)
+
+    def _collect(future, label):
+        try:
+            return future.result()
+        except Exception as ex:
+            warnings.append(f"{label} track failed: {ex}")
+            return []
+
+    background: list[BackgroundFact] = _collect(bg_future, "background")
+    rapport: list[RapportHook] = _collect(rapport_future, "rapport")
+    org: list[OrgInference] = _collect(org_future, "org-inference")
+    pool.shutdown(wait=False)
+
+    outreach: OutreachBrief | None = None
     try:
-        org = run_org_inference(contact, company, gate_docs, llm)
+        findings = {
+            "company": {"name": company.canonical_name, "type": company.places_type,
+                        "city": company.city, "state": company.state,
+                        "website": company.website},
+            "contact": {"name": contact.name, "title": contact.title},
+            "currency": gate.currency,
+            "background": [asdict(f) for f in background],
+            "rapport": [asdict(h) for h in rapport],
+            "engagement": [asdict(e) for e in engagement],
+            "org": [asdict(o) for o in org],
+            "reach_channels": sorted({r.kind for r in reach}),
+            "engagement_status": research_log["engagement"]["status"],
+        }
+        outreach = run_outreach(contact, company, llm, findings, seller=seller)
     except Exception as ex:
-        warnings.append(f"org-inference track failed: {ex}")
+        warnings.append(f"outreach synthesis failed: {ex}")
 
     return ContactDossier(
         contact=contact, company=company, gate=gate,
         reach=reach, background=background, engagement=engagement,
-        org_inferences=org, warnings=warnings, fetched_pages=_pages_dict(),
+        org_inferences=org, rapport=rapport, outreach=outreach,
+        research_log=research_log, warnings=warnings,
+        fetched_pages=_pages_dict(),
     )
 
 
@@ -705,13 +1275,14 @@ def dossier_to_dict(dossier: ContactDossier) -> dict[str, Any]:
 if __name__ == "__main__":
     import json
     from contact_discovery import MockSearchProvider
+    from fetch_and_extract import FetchResult
 
     contact = ContactCandidate(
         name="Jane Doe",
         title="Director of Operations",
         company="Acme Widgets",
-        evidence=[{"url": "https://acmewidgets.com/team",
-                   "snippet": "Meet our team", "query": "..."}],
+        evidence=[{"url": "https://acmewidgets.com/",
+                   "snippet": "Acme Widgets", "query": "..."}],
         confidence="high",
         why_relevant="Runs operations; owns facilities decisions.",
     )
@@ -733,6 +1304,15 @@ if __name__ == "__main__":
                                    "https://acmewidgets.com/team", None, "medium")],
         org=[OrgInference("Likely reports to the Managing Partner",
                           ["https://acmewidgets.com/team"], "low")],
+        rapport=[RapportHook("Runs the office 5K every spring", "community",
+                             "https://acmewidgets.com/team",
+                             "Ask how this year's race went")],
+        outreach=OutreachBrief(
+            angles=[OutreachAngle("Office refresh", "Saw the team page...",
+                                  "Ties to facilities work",
+                                  ["https://acmewidgets.com/team"])],
+            likely_needs=["Facilities refresh after growth (hypothesis)"],
+        ),
     )
     engagement = MockEngagementResearcher(items=[
         EngagementItem("https://example.com/post", "post",
@@ -742,24 +1322,29 @@ if __name__ == "__main__":
     ])
 
     search = MockSearchProvider(fixtures={"": [
-        {"title": "Team", "url": "https://acmewidgets.com/team",
-         "snippet": "Jane Doe, Director of Operations. john.smith@acmewidgets.com"},
+        {"title": "Jane Doe - Acme Widgets", "url": "https://example.com/post",
+         "snippet": "Jane Doe on modernizing facilities"},
     ]})
 
     class _StubFetcher:
         """Offline stand-in for PageFetcher (build_dossier calls .fetch(url))."""
         def fetch(self, url):
-            from fetch_and_extract import FetchResult
-            return FetchResult(
-                url=url, ok=True, final_url=url, status_code=200,
-                title="Team",
-                text=("Jane Doe, Director of Operations. "
-                      "john.smith@acmewidgets.com"),
-            )
+            pages = {
+                "https://acmewidgets.com/": ("Home", "Welcome to Acme Widgets.",
+                    [{"href": "https://acmewidgets.com/team", "text": "Meet the team"}]),
+                "https://acmewidgets.com/team": ("Team",
+                    "Jane Doe, Director of Operations. john.smith@acmewidgets.com", []),
+            }
+            if url not in pages:
+                return FetchResult(url=url, ok=False, error="http_404")
+            title, text, links = pages[url]
+            return FetchResult(url=url, ok=True, final_url=url, status_code=200,
+                               title=title, text=text, links=links)
 
     dossier = build_dossier(
         contact, company,
         search=search, fetcher=_StubFetcher(), llm=llm,
         engagement_researcher=engagement,
+        seller=SellerContext("demo", "Demo Seller", "Sells widgets."),
     )
     print(json.dumps(dossier_to_dict(dossier), indent=2))

@@ -5,7 +5,7 @@ Concrete implementation of the ``DossierLLM`` seam from contact_dossier.py,
 using OpenAI (default model ``gpt-5.5``) via the Responses API. This keeps
 contact_dossier.py provider-free: the backend binding lives entirely here.
 
-None of these five methods uses web search — they reason over text the spine
+None of these methods uses web search — they reason over text the spine
 has already fetched (the ``Doc`` lists) — so each call is a plain
 text-in / structured-JSON-out completion with a strict json_schema, which is
 where OpenAI Structured Outputs are strongest.
@@ -26,6 +26,10 @@ from contact_dossier import (
     ReachValue,
     EngagementItem,
     OrgInference,
+    RapportHook,
+    OutreachAngle,
+    OutreachBrief,
+    SellerContext,
     Doc,
     ContactCandidate,
     CompanyInput,
@@ -72,6 +76,9 @@ SIGNALS_SCHEMA = _obj(
     ["present_urls", "departure_signals", "current_title_notes"],
 )
 
+_IDENTITY_DESC = ("confirmed | probable | possible -- is this really the same "
+                  "person? (see prompt)")
+
 BACKGROUND_SCHEMA = _obj(
     {
         "facts": {
@@ -82,8 +89,11 @@ BACKGROUND_SCHEMA = _obj(
                     "source_url": {"type": "string"},
                     "date": _nullable_str(),
                     "confidence": {"type": "string"},
+                    "identity": {"type": "string", "description": _IDENTITY_DESC},
+                    "identity_note": {"type": "string"},
                 },
-                ["claim", "source_url", "date", "confidence"],
+                ["claim", "source_url", "date", "confidence", "identity",
+                 "identity_note"],
             ),
         }
     },
@@ -150,9 +160,69 @@ ORG_SCHEMA = _obj(
 )
 
 
+RAPPORT_SCHEMA = _obj(
+    {
+        "hooks": {
+            "type": "array",
+            "items": _obj(
+                {
+                    "detail": {"type": "string"},
+                    "kind": {"type": "string"},
+                    "source_url": {"type": "string"},
+                    "suggested_use": {"type": "string"},
+                },
+                ["detail", "kind", "source_url", "suggested_use"],
+            ),
+        }
+    },
+    ["hooks"],
+)
+
+OUTREACH_SCHEMA = _obj(
+    {
+        "angles": {
+            "type": "array",
+            "items": _obj(
+                {
+                    "angle": {"type": "string"},
+                    "opener": {"type": "string"},
+                    "rationale": {"type": "string"},
+                    "evidence": {"type": "array", "items": {"type": "string"}},
+                },
+                ["angle", "opener", "rationale", "evidence"],
+            ),
+        },
+        "likely_needs": {"type": "array", "items": {"type": "string"}},
+        "why_now": _nullable_str(),
+        "avoid": {"type": "array", "items": {"type": "string"}},
+        "open_questions": {"type": "array", "items": {"type": "string"}},
+        "channel": {"type": "string"},
+        "tone": {"type": "string"},
+    },
+    ["angles", "likely_needs", "why_now", "avoid", "open_questions",
+     "channel", "tone"],
+)
+
+
 # -----------------------------------------------------------------------------
 # Prompt building
 # -----------------------------------------------------------------------------
+
+def _seller_block(seller: SellerContext | None) -> str:
+    """Who the outreach is for. Without it, 'relevant' defaults to a generic
+    B2B rep, which is how dossiers ended up describing the prospect's
+    brochure instead of what the seller can use."""
+    if seller is None:
+        return ("Seller: a B2B sales rep preparing cold outreach (no seller "
+                "profile available).\n\n")
+    lines = [
+        "Seller (who is doing the outreach and what they sell):",
+        f"- {seller.display_name}: {seller.description}",
+    ]
+    if seller.sales_rationale:
+        lines.append(f"- Why they sell to this kind of business: {seller.sales_rationale}")
+    return "\n".join(lines) + "\n\n"
+
 
 def _render_docs(documents: list[Doc], per_doc_chars: int) -> str:
     if not documents:
@@ -160,7 +230,8 @@ def _render_docs(documents: list[Doc], per_doc_chars: int) -> str:
     blocks = []
     for i, d in enumerate(documents):
         blocks.append(
-            f"[{i}] {d.source_type} | {d.url} | fetched_at={d.fetched_at or 'n/a'}\n"
+            f"[{i}] {d.source_type} | {getattr(d, 'purpose', '') or '-'} | {d.url} | "
+            f"fetched_at={d.fetched_at or 'n/a'}\n"
             f"{(d.text or '')[:per_doc_chars]}"
         )
     return "\n\n".join(blocks)
@@ -175,13 +246,15 @@ class OpenAIDossierLLM(DossierLLM):
         self,
         client: Any | None = None,
         model: str = DEFAULT_MODEL,
-        max_output_tokens: int = 4000,
-        per_doc_chars: int = 4000,
+        max_output_tokens: int = 6000,
+        per_doc_chars: int = 6000,      # matches contact_dossier's focus_text budget
+        max_findings_chars: int = 30000,
     ):
         self._client = client
         self.model = model
         self.max_output_tokens = max_output_tokens
         self.per_doc_chars = per_doc_chars
+        self.max_findings_chars = max_findings_chars
 
     def _get_client(self):
         if self._client is None:
@@ -223,31 +296,41 @@ class OpenAIDossierLLM(DossierLLM):
             ) from ex
 
     def _context(self, contact: ContactCandidate, company: CompanyInput,
-                 documents: list[Doc]) -> str:
+                 documents: list[Doc], seller: SellerContext | None = None) -> str:
         return (
-            "Contact under research:\n"
+            _seller_block(seller)
+            + "Contact under research:\n"
             f"- name: {contact.name}\n"
             f"- title (as discovered): {contact.title or 'unknown'}\n"
             f"- company: {company.canonical_name}\n"
+            f"- company website: {company.website or company.domain or 'unknown'}\n"
             f"- location: {company.city}, {company.state}\n\n"
-            "Evidence documents (index, source_type, url, fetched_at, then text):\n"
+            "Evidence documents (index, source_type, purpose, url, fetched_at, then text).\n"
+            "source_type: own_domain_page = the company's own site; external_page = "
+            "another site, fetched; search_snippet / social_snippet / linkedin_snippet = "
+            "only a search-engine title+snippet (full page NOT read). '[...]' marks "
+            "text elided around the person's name.\n"
             f"{_render_docs(documents, self.per_doc_chars)}\n"
         )
 
-    # --- the five seam methods ---------------------------------------------
+    # --- the seam methods --------------------------------------------------
 
     def detect_person_signals(self, contact, company, documents) -> PersonSignals:
         prompt = self._context(contact, company, documents) + """
 Task: using ONLY the evidence above, assess whether this person currently holds
 this role at this company.
+- Some documents may be about a DIFFERENT person with the same name (search
+  results include namesakes). Ignore any document you cannot tie to this
+  person (same company, same profession/area, or a known URL).
 - present_urls: URLs whose text shows the person is CURRENTLY affiliated with
   the company in this or a similar role.
 - current_title_notes: short {url, note} entries confirming the current title.
 - departure_signals: include a {url, note} entry ONLY when the evidence
-  POSITIVELY indicates the person has LEFT or changed employer (a named
+  POSITIVELY indicates THIS person has LEFT or changed employer (a named
   successor in the same seat, "formerly", a different current employer). NEVER
-  infer departure from mere absence of the person from a page. If there is no
-  positive departure evidence, return an empty departure_signals array.
+  infer departure from mere absence of the person from a page. A second,
+  concurrent role elsewhere is NOT departure. If there is no positive
+  departure evidence, return an empty departure_signals array.
 Return JSON matching the schema.
 """
         data = self._complete("person_signals", SIGNALS_SCHEMA, prompt)
@@ -257,13 +340,30 @@ Return JSON matching the schema.
             current_title_notes=list(data.get("current_title_notes", [])),
         )
 
-    def extract_background_facts(self, contact, company, documents) -> list[BackgroundFact]:
-        prompt = self._context(contact, company, documents) + """
-Task: extract PROFESSIONALLY RELEVANT background facts (tenure, prior roles,
-education if role-relevant).
-- Include ONLY facts useful to a B2B sales rep preparing outreach.
-- EXCLUDE unrelated personal trivia (hobbies, sports history, family) unless
-  clearly relevant to a professional conversation.
+    def extract_background_facts(self, contact, company, documents,
+                                 seller=None) -> list[BackgroundFact]:
+        prompt = self._context(contact, company, documents, seller) + """
+Task: extract background facts about THE PERSON that would help the seller
+open a cold conversation.
+- Focus on the person, not the company brochure: career history and prior
+  employers, credentials/licenses, education if role-relevant, how and when
+  they started or joined this business, tenure, professional/community roles,
+  awards, publications.
+- Do NOT restate the company's service list, pricing, or marketing copy. At
+  most ONE fact about the business itself, and only if it says something
+  about the person's role (e.g. "founded the firm in 2016").
+- EXCLUDE personal-life details (hobbies, pets, family) -- a separate step
+  handles self-published personal details.
+- identity (required for every fact):
+    "confirmed" = the source ties this name to THIS company (e.g. the company
+                  site, or a page naming both);
+    "probable"  = same name AND matching profession/area, but the source does
+                  not mention this company (e.g. a past employer's staff page
+                  in the same metro and field);
+    "possible"  = same name, weak or partial match.
+  Drop documents clearly about a different person (different field or
+  region, unrelated news). identity_note: one short phrase on why (e.g.
+  "Atlanta CPA firm staff page; same name and field; ACE not mentioned").
 - Date each fact where the evidence supports it; use null when unknown.
 - Cite a source_url for every fact. Do not invent facts.
 Return JSON matching the schema.
@@ -275,6 +375,8 @@ Return JSON matching the schema.
                 source_url=f.get("source_url", ""),
                 date=f.get("date"),
                 confidence=f.get("confidence", "low"),
+                identity=(f.get("identity") or "possible").lower(),
+                identity_note=f.get("identity_note", ""),
             )
             for f in data.get("facts", [])
         ]
@@ -285,6 +387,8 @@ Task: extract contact-reach info that the evidence EXPLICITLY ties to THIS
 person.
 - Include only emails/phones/profile URLs the evidence associates with this
   specific person (not generic company info unless it is the person's own).
+  At a one- or two-person firm, the firm's main email/phone on its own site
+  counts as the person's, with confidence "medium".
 - how_obtained: "listed" if directly stated in a source; "snippet" if only from
   a search snippet. Do NOT guess or pattern-invent addresses (deterministic
   email-pattern inference is handled elsewhere).
@@ -306,18 +410,25 @@ Return JSON matching the schema.
             for v in data.get("values", [])
         ]
 
-    def summarize_engagement(self, contact, company, documents) -> list[EngagementItem]:
-        prompt = self._context(contact, company, documents) + """
-Task: identify recent PUBLIC content BY or prominently FEATURING this person
-that is useful for warm-up outreach. For EVERY item, apply all three checks:
+    def summarize_engagement(self, contact, company, documents,
+                             seller=None) -> list[EngagementItem]:
+        prompt = self._context(contact, company, documents, seller) + """
+Task: identify PUBLIC activity BY or prominently FEATURING this person that
+the seller could reference in a cold opener: posts (including posts in local
+community or business groups), articles, interviews, podcasts, talks, awards,
+association or chamber involvement, replies to reviews, directory listings
+that show what they're doing. For EVERY item, apply all three checks:
 1) DISAMBIGUATION: confirm the content is THIS person (same company/role/
    location, or a known URL), not a namesake. Set identity_confidence
    (high/medium/low); drop items you cannot plausibly tie to this person.
-2) PROFESSIONAL RELEVANCE: include only items relevant to a professional/
-   business conversation. Exclude unrelated personal or historical trivia
-   (e.g. college sports) even when it is clearly the same person.
+2) RELEVANCE: include items useful for a professional conversation with
+   this seller. Exclude unrelated personal or historical trivia (e.g. college
+   sports, crime or court news about a namesake).
 3) RECENCY: prefer recent items; include a date where supported, else null.
-Give each item a one-line summary and a relevance note.
+- An item seen only as a search/social snippet is allowed: say so in the
+  summary ("from search snippet; full text not read").
+Give each item a one-line summary and a relevance note saying how the seller
+could use it.
 Return JSON matching the schema.
 """
         data = self._complete("engagement", ENGAGEMENT_SCHEMA, prompt)
@@ -338,11 +449,15 @@ Return JSON matching the schema.
         prompt = self._context(contact, company, evidence) + """
 Task: infer this person's likely reporting relationships and area of
 responsibility. This is LOW CONFIDENCE by nature.
+- If the evidence shows an owner-operator or a firm of one or two people
+  (the person is the founder/owner and no other staff are named), return
+  EXACTLY ONE inference, e.g. "Owner-operator; sole decision-maker", and
+  nothing else.
 - Every inference MUST cite at least one concrete source_url (in "basis") drawn
   from the evidence. If you cannot cite evidence, DO NOT include the inference.
-- Do not restate plain employment facts as org clues; include only genuine
-  reporting/responsibility inferences.
-- Return AT MOST 3 inferences — the most important only.
+- Do not restate plain employment facts or the company's service list as org
+  clues; include only genuine reporting/responsibility inferences.
+- Return AT MOST 3 inferences -- the most important only.
 - "basis" must contain source URLs only, never quoted or paraphrased evidence
   text. Keep each "claim" to a single sentence.
 Return JSON matching the schema.
@@ -356,3 +471,88 @@ Return JSON matching the schema.
             )
             for o in data.get("inferences", [])
         ]
+
+    def extract_rapport_hooks(self, contact, company, documents,
+                              seller=None) -> list[RapportHook]:
+        prompt = self._context(contact, company, documents, seller) + """
+Task: find personal details THIS PERSON CHOSE TO PUBLISH about themselves
+that would make a warm, natural opener in a cold message -- e.g. an office
+dog or mascot, hobbies or interests named in their bio, why they started the
+business, hometown or school they mention, causes or community groups they
+promote.
+STRICT BOUNDARY -- include a detail only if ALL are true:
+- it comes from a source the person controls or authored: their company's own
+  site (own_domain_page) or their own post/profile (social/linkedin snippet
+  clearly authored by them);
+- it is about them, not about family members (no spouse/children names);
+- it is NOT home address, health, religion, politics, finances, or anything
+  from people-search, background-check or data-aggregator sites, or news.
+Return [] if nothing qualifies -- that is a normal outcome.
+For each: detail (one sentence), kind (pet | hobby | interest | origin_story |
+community | other), source_url, and suggested_use (one line on how to mention
+it lightly, without sounding like surveillance).
+Return JSON matching the schema.
+"""
+        data = self._complete("rapport", RAPPORT_SCHEMA, prompt)
+        return [
+            RapportHook(
+                detail=h.get("detail", ""),
+                kind=h.get("kind", "other"),
+                source_url=h.get("source_url", ""),
+                suggested_use=h.get("suggested_use", ""),
+            )
+            for h in data.get("hooks", [])
+        ]
+
+    def synthesize_outreach(self, contact, company, findings,
+                            seller=None) -> OutreachBrief:
+        prompt = (
+            _seller_block(seller)
+            + "Research findings about the prospect (JSON; every item carries "
+              "its source URL):\n"
+            + json.dumps(findings, indent=1, default=str)[: self.max_findings_chars]
+            + """
+
+Task: write a short cold-outreach brief for the seller above.
+- angles: 2-3 distinct ways to open. Each has a short label, an opener of 1-2
+  plain, specific sentences the seller could adapt (no flattery, no
+  "I hope this finds you well"), a rationale tying it to the SELLER'S offer,
+  and evidence = the source URLs it rests on. Build openers ONLY from facts
+  whose identity is "confirmed" or "probable" and engagement items with
+  identity_confidence high/medium. A rapport detail may be one light touch,
+  never the whole pitch.
+- likely_needs: 1-3 hypotheses about what this prospect might need from the
+  seller, phrased as hypotheses and grounded in the findings.
+- why_now: a concrete timing reason if the findings support one (new
+  business, recent move, recent post, growth), else null. Do not invent one.
+- avoid: things that would land badly (e.g. leading with a detail only seen
+  on a third-party site; if the prospect's business competes with the
+  seller's, say so here).
+- open_questions: identity doubts and contradictions to resolve before
+  relying on them (e.g. a "possible"/"probable" prior employer that may or
+  may not be current), each phrased as a question.
+- channel: the best first channel given what was found (email, phone, a
+  specific community group, LinkedIn) and why, in one sentence.
+- tone: one short phrase (e.g. "friendly local peer", "brief and formal").
+Use only the findings above; do not invent facts.
+Return JSON matching the schema.
+"""
+        )
+        data = self._complete("outreach", OUTREACH_SCHEMA, prompt)
+        return OutreachBrief(
+            angles=[
+                OutreachAngle(
+                    angle=a.get("angle", ""),
+                    opener=a.get("opener", ""),
+                    rationale=a.get("rationale", ""),
+                    evidence=list(a.get("evidence", [])),
+                )
+                for a in data.get("angles", [])
+            ],
+            likely_needs=list(data.get("likely_needs", [])),
+            why_now=data.get("why_now"),
+            avoid=list(data.get("avoid", [])),
+            open_questions=list(data.get("open_questions", [])),
+            channel=data.get("channel", ""),
+            tone=data.get("tone", ""),
+        )

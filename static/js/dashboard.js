@@ -701,7 +701,7 @@ async function rebuildDossier(contactId, btn) {
   const original = btn.textContent;
   btn.disabled = true;
   btn.textContent = "Rebuilding…";
-  panel.innerHTML = `<p class="empty-msg">Rebuilding dossier — rerunning the gate, reach, background, engagement & org tracks…</p>`;
+  panel.innerHTML = `<p class="empty-msg">Rebuilding dossier — researching the company site and the web, then writing the outreach brief (about a minute)…</p>`;
   panel.classList.remove("hidden");
   try {
     const resp = await fetch(`/api/contacts/${contactId}/dossier`, { method: "POST" });
@@ -721,6 +721,39 @@ async function rebuildDossier(contactId, btn) {
 function provLink(url) {
   if (!url) return "";
   return `<a href="${url}" target="_blank" rel="noopener" class="prov-link" title="${escapeHtml(url)}">source</a>`;
+}
+
+function identityBadge(level) {
+  if (!level || level === "confirmed") return "";
+  return `<span class="id-badge id-${slugify(level)}" title="Same name, but not confirmed to be this person">${escapeHtml(level)} match</span>`;
+}
+
+function renderOutreach(o) {
+  if (!o) return "";
+  const list = (items) => (items || []).map(x => `<li>${escapeHtml(x)}</li>`).join("");
+  const angles = (o.angles || []).map(a => `
+    <li class="angle">
+      <strong>${escapeHtml(a.angle)}</strong>
+      <div class="angle-opener">“${escapeHtml(a.opener)}”</div>
+      ${a.rationale ? `<div class="eng-rel">${escapeHtml(a.rationale)}</div>` : ""}
+      ${(a.evidence || []).map(u => provLink(u)).join(" ")}
+    </li>`).join("");
+  const sub = (label, inner) => inner ? `<div class="brief-sub"><h6>${label}</h6><ul class="dossier-list">${inner}</ul></div>` : "";
+  const meta = [
+    o.why_now ? `<div><b>Why now:</b> ${escapeHtml(o.why_now)}</div>` : "",
+    o.channel ? `<div><b>Channel:</b> ${escapeHtml(o.channel)}</div>` : "",
+    o.tone ? `<div><b>Tone:</b> ${escapeHtml(o.tone)}</div>` : "",
+  ].join("");
+  if (!angles && !meta && !(o.likely_needs || []).length) return "";
+  return `
+    <div class="dossier-block outreach-brief">
+      <h5>Outreach brief</h5>
+      ${angles ? `<ul class="dossier-list">${angles}</ul>` : ""}
+      ${meta ? `<div class="brief-meta">${meta}</div>` : ""}
+      ${sub("Likely needs (hypotheses)", list(o.likely_needs))}
+      ${sub("Avoid", list(o.avoid))}
+      ${sub("Check before relying on", list(o.open_questions))}
+    </div>`;
 }
 
 function renderDossier(contactId, d) {
@@ -750,7 +783,21 @@ function renderDossier(contactId, d) {
 
   const bgHtml = (d.background || []).map(f => `
     <li>${escapeHtml(f.claim)} ${confidenceBadge(f.confidence)}
-      ${f.date ? `<span class="how">${escapeHtml(f.date)}</span>` : ""} ${provLink(f.source_url)}</li>`).join("");
+      ${identityBadge(f.identity)}
+      ${f.date ? `<span class="how">${escapeHtml(f.date)}</span>` : ""} ${provLink(f.source_url)}
+      ${f.identity && f.identity !== "confirmed" && f.identity_note ? `<span class="reach-note">${escapeHtml(f.identity_note)}</span>` : ""}</li>`).join("");
+
+  const rapportHtml = (d.rapport || []).map(h => `
+    <li>${escapeHtml(h.detail)} <span class="how">${escapeHtml(h.kind || "")}</span> ${provLink(h.source_url)}
+      ${h.suggested_use ? `<div class="eng-rel">${escapeHtml(h.suggested_use)}</div>` : ""}</li>`).join("");
+
+  const log = d.research_log || {};
+  const engStatus = (log.engagement || {}).status;
+  const engEmpty = {
+    no_results: "Searched — nothing beyond the company's own site turned up.",
+    filtered: `Searched — ${(log.engagement || {}).candidates ?? "some"} results reviewed, none confirmed as this person's public activity.`,
+    failed: "Engagement search failed — see warnings.",
+  }[engStatus] || "No public engagement found.";
 
   const engHtml = (d.engagement || []).map(e => `
     <li>
@@ -773,13 +820,23 @@ function renderDossier(contactId, d) {
     ? `<div class="dossier-warnings">${(d.warnings || []).map(w => `<div>⚠ ${escapeHtml(w)}</div>`).join("")}</div>`
     : "";
 
+  const queries = log.queries || [];
+  const pagesRead = (log.own_site_pages || []).filter(p => p.ok).length;
+  const logHtml = queries.length
+    ? `<p class="research-log" title="${escapeHtml(queries.map(q => `${q.purpose}: ${q.query} (${q.results})`).join("\n"))}">
+         Researched with ${queries.length} search${queries.length === 1 ? "" : "es"} (${log.search_results ?? 0} unique results) and ${pagesRead} page${pagesRead === 1 ? "" : "s"} of the company site${log.seller ? ` · for ${escapeHtml(log.seller)} profile` : ""}.</p>`
+    : "";
+
   panel.innerHTML = `
     <div class="dossier">
       ${gateHtml}
+      ${renderOutreach(d.outreach)}
       ${section("Reach", reachHtml, "No reach info found.")}
       ${section("Background", bgHtml, "No background facts.")}
-      ${section("Engagement", engHtml, "No public engagement found.")}
+      ${section("Rapport (self-published)", rapportHtml, "No self-published personal details found.")}
+      ${section("Engagement", engHtml, engEmpty)}
       ${section("Org inference (low confidence)", orgHtml, "No cited inferences.")}
+      ${logHtml}
       ${warnHtml}
     </div>
   `;

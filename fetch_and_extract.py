@@ -38,6 +38,7 @@ staleness logic has a real provenance date to work with.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass, field, asdict
@@ -124,6 +125,10 @@ class FetchResult:
     truncated: bool = False               # hit max_bytes before the page ended
     skipped_reason: str | None = None     # e.g. "denylisted:linkedin.com"
     error: str | None = None              # e.g. "timeout", "connection_error"
+    # Outbound links ({"href": absolute url, "text": anchor text}), captured
+    # BEFORE nav/header/footer are stripped, so a caller can follow a site's
+    # own navigation (e.g. "Meet Steven" -> /about). Not part of `text`.
+    links: list[dict] = field(default_factory=list)
     fetched_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -217,6 +222,38 @@ def _collapse_whitespace(text: str) -> str:
             out.append("")           # keep a single blank line as a separator
             blank = True
     return "\n".join(out).strip()
+
+
+def extract_links(html: str, base_url: str, max_links: int = 300) -> list[dict]:
+    """
+    Return the page's links as [{"href": absolute_url, "text": anchor_text}],
+    in document order, deduped by href. Includes nav/header/footer links (which
+    is the point: site navigation is where About/Team pages are linked). Never
+    raises; returns [] on any parse problem.
+    """
+    from urllib.parse import urljoin
+    out: list[dict] = []
+    seen: set[str] = set()
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, "html.parser")
+        anchors = [(a.get("href") or "", a.get_text(" ", strip=True))
+                   for a in soup.find_all("a", href=True)]
+    except Exception:
+        anchors = [(m.group(1), "") for m in
+                   re.finditer(r'<a\s[^>]*href=["\']([^"\']+)["\']', html, re.I)]
+    for href, text in anchors:
+        href = href.strip()
+        if not href or href.startswith(("mailto:", "tel:", "javascript:")):
+            continue
+        absolute = urljoin(base_url, href)
+        if absolute in seen:
+            continue
+        seen.add(absolute)
+        out.append({"href": absolute, "text": (text or "")[:120]})
+        if len(out) >= max_links:
+            break
+    return out
 
 
 def extract_main_text(html: str) -> tuple[str | None, str]:
@@ -393,6 +430,7 @@ class PageFetcher:
         title, text = extract_main_text(html)
         result.title = title
         result.text = text
+        result.links = extract_links(html, result.final_url or url)
         result.ok = True
         return result
 
