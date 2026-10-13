@@ -39,7 +39,7 @@ from contact_dossier import (
 )
 from contact_discovery import SearchResult
 
-DEFAULT_MODEL = "gpt-5.5"
+DEFAULT_MODEL = "gpt-6.1-sol"
 
 
 class DossierLLMError(RuntimeError):
