@@ -1,15 +1,10 @@
 import json
-import re
-import time
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
-import requests
-from bs4 import BeautifulSoup
 from flask import current_app
 from openai import OpenAI
 
-SCRAPE_DELAY = 0.5
-MAX_CHARS = 10000
+MAX_CHARS = 14000
 
 HIGH_VALUE_SLUGS = [
     "about", "services", "products", "contact", "team",
@@ -41,53 +36,78 @@ EXTRACTION_SCHEMA = {
 
 
 # ── SCRAPING ──────────────────────────────────────────────────────────────────
+#
+# Uses the shared PageFetcher (robots, politeness delay, denylist) and the
+# links it records BEFORE nav/header/footer are stripped. The old scraper
+# removed the nav first and then looked for links, so menu-only pages like a
+# salon's "Team" or a dealership's "Meet Our Staff" were never read and
+# key_contacts came back "Unknown".
 
-def _fetch_page(url: str, visited: set) -> tuple[str, object]:
-    if url in visited:
-        return "", None
-    visited.add(url)
-    try:
-        headers = {"User-Agent": "Mozilla/5.0 (compatible; ProspectBot/1.0)"}
-        resp = requests.get(url, headers=headers, timeout=10)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        for tag in soup(["script", "style", "nav", "footer", "header"]):
-            tag.decompose()
-        text = re.sub(r"\s+", " ", soup.get_text(separator=" ", strip=True))
-        return text, soup
-    except Exception as e:
-        current_app.logger.warning(f"Scrape failed for {url}: {e}")
-        return "", None
+HOME_CHARS = 3500        # cap for the homepage, so it can't crowd out the rest
+PAGE_CHARS = 2500        # cap for each other page
+MAX_PAGES = 6            # pages read after the homepage
+
+
+def _link_priority(link: dict) -> int:
+    """People pages first (they feed key_contacts), then other useful pages."""
+    from contact_discovery import score_people_link
+    people = score_people_link(link)
+    if people >= 2:
+        return 10 + people
+    blob = f"{link.get('text') or ''} {urlparse(link.get('href') or '').path}".lower()
+    return 1 if any(slug in blob for slug in HIGH_VALUE_SLUGS) else 0
 
 
 def scrape_website(url: str) -> str:
     if not url:
         return ""
+    from fetch_and_extract import PageFetcher
+    fetcher = PageFetcher()
 
-    visited = set()
-    collected = []
+    home = fetcher.fetch(url)
+    if not (home.ok and home.text):
+        current_app.logger.warning(
+            f"Scrape failed for {url}: {home.error or home.skipped_reason}")
+        return ""
+    host = urlparse(home.final_url or url).netloc.lower().removeprefix("www.")
 
-    base_domain = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
-    text, soup = _fetch_page(url, visited)
-    if text:
-        collected.append(text)
+    sections = [f"[Page: {home.final_url or url}]\n{home.text[:HOME_CHARS]}"]
+    seen = {(home.final_url or url).split("#")[0].split("?")[0].rstrip("/").lower(),
+            url.split("#")[0].split("?")[0].rstrip("/").lower()}
+    candidates: dict[str, tuple[int, str]] = {}
+    for link in home.links:
+        href = link.get("href") or ""
+        if urlparse(href).netloc.lower().removeprefix("www.") != host:
+            continue
+        key = href.split("#")[0].split("?")[0].rstrip("/").lower()
+        if key in seen:
+            continue
+        prio = _link_priority(link)
+        if prio > 0 and (key not in candidates or candidates[key][0] < prio):
+            candidates[key] = (prio, href.split("#")[0])
 
-    if soup:
-        for a_tag in soup.find_all("a", href=True):
-            href = a_tag["href"].lower()
-            full_url = urljoin(base_domain, a_tag["href"])
-            if urlparse(full_url).netloc == urlparse(url).netloc:
-                if any(slug in href for slug in HIGH_VALUE_SLUGS):
-                    page_text, _ = _fetch_page(full_url, visited)
-                    if page_text:
-                        collected.append(page_text)
-                        time.sleep(SCRAPE_DELAY)
-
-    combined = " ".join(collected)
-    return combined[:MAX_CHARS]
+    for _, href in sorted(candidates.values(), key=lambda t: -t[0])[:MAX_PAGES]:
+        fr = fetcher.fetch(href)
+        if fr.ok and fr.text:
+            sections.append(f"[Page: {fr.final_url or href}]\n{fr.text[:PAGE_CHARS]}")
+    return "\n\n".join(sections)[:MAX_CHARS]
 
 
 # ── EXTRACTION ────────────────────────────────────────────────────────────────
+
+def _seller_note() -> str:
+    """Who the research is for (active searcher profile), so pain points and
+    the outreach angle are about what THIS seller sells, not generic B2B."""
+    try:
+        from active_profile import get_active_profile
+        prof = get_active_profile()
+        return (f"The research is for this seller: {prof.display_name} -- "
+                f"{prof.description}\n"
+                "Write potential_pain_points and outreach_angle about what THIS "
+                "seller offers; do not suggest products the seller doesn't sell.\n")
+    except Exception:
+        return ""
+
 
 def extract_intel(name: str, address: str, raw_text: str) -> dict:
     client = OpenAI(api_key=current_app.config["OPENAI_API_KEY"])
@@ -95,11 +115,15 @@ def extract_intel(name: str, address: str, raw_text: str) -> dict:
     prompt = f"""
 You are a B2B sales researcher. Given the following scraped website content for a business,
 extract structured intelligence useful for a sales rep.
-
+{_seller_note()}
 Business Name: {name}
 Address: {address}
-Website Content:
+Website Content (several pages, each starting with [Page: url]):
 {raw_text if raw_text else "[No website content available — infer from business name/address only]"}
+
+For key_contacts, list the people the pages name with their titles, most senior or
+most relevant to the seller first (up to 10), e.g. "Jane Doe (General Manager);
+John Roe (Marketing Director)". If the pages give only first names, list those.
 
 Return ONLY the structured fields. If a field cannot be determined, return "Unknown".
 """
