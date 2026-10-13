@@ -38,6 +38,7 @@ from contact_discovery import (
     ContactCandidate,
     BraveSearchProvider,
     GeminiExtractor,
+    OpenAIExtractor,
     discover_contacts,
     normalize_domain,
 )
@@ -114,8 +115,14 @@ def _search_provider() -> BraveSearchProvider:
     return BraveSearchProvider(current_app.config.get("BRAVE_SEARCH_API_KEY"))
 
 
-def _extractor() -> GeminiExtractor:
-    return GeminiExtractor(current_app.config.get("GEMINI_API_KEY"))
+def _extractor():
+    """Stage 2 contact extractor. OpenAI (gpt-6-luna, reasoning low) by
+    default; DISCOVERY_PROVIDER=gemini switches back to Gemini."""
+    provider = (current_app.config.get("DISCOVERY_PROVIDER")
+                or os.environ.get("DISCOVERY_PROVIDER") or "openai").strip().lower()
+    if provider == "gemini":
+        return GeminiExtractor(current_app.config.get("GEMINI_API_KEY"))
+    return OpenAIExtractor(current_app.config.get("OPENAI_API_KEY"))
 
 
 def _person_search() -> OpenAIWebPersonSearch | None:

@@ -8,7 +8,7 @@ the same (segment x profile) pipeline serves any registered searcher.
 
 Examples
 --------
-  # Real run (needs BRAVE_SEARCH_API_KEY + GEMINI_API_KEY; SEARCHER from .env):
+  # Real run (needs BRAVE_SEARCH_API_KEY + OPENAI_API_KEY; SEARCHER from .env):
   python run_discovery.py --name "Blevins & Hong, PC" --city Duluth --state GA \
       --type lawyer --website https://gwinnettcountylaw.com/
 
@@ -25,11 +25,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 
 from searcher_profiles import get_profile
 from active_profile import get_active_profile
 from contact_discovery import (
-    CompanyInput, BraveSearchProvider, GeminiExtractor,
+    CompanyInput, BraveSearchProvider, GeminiExtractor, OpenAIExtractor,
     MockSearchProvider, MockExtractor, discover_contacts, run_to_dict,
 )
 
@@ -80,7 +81,8 @@ def main(argv: list[str] | None = None) -> None:
         extractor = MockExtractor([])
     else:
         search_provider = BraveSearchProvider()   # reads BRAVE_SEARCH_API_KEY
-        extractor = GeminiExtractor()              # reads GEMINI_API_KEY
+        extractor = (GeminiExtractor() if os.environ.get("DISCOVERY_PROVIDER", "").lower() == "gemini"
+                     else OpenAIExtractor())    # reads OPENAI_API_KEY (gpt-6-luna)
 
     run = discover_contacts(
         company, profile, search_provider, extractor,

@@ -317,43 +317,142 @@ class LLMExtractor:
         raise NotImplementedError
 
 
+def _build_extraction_prompt(company, segment, play, results) -> str:
+    results_block = "\n".join(
+        f"[{i}] {r.title}\n    {r.snippet}\n    ({r.url})"
+        for i, r in enumerate(results)
+    )
+    ranked_roles = "\n".join(
+        f"- {rr.role.display}" + (" (speculative probe)" if rr.is_probe else "")
+        for rr in play.roles
+    )
+    return EXTRACTION_PROMPT.format(
+        searcher=play.searcher_display,
+        company_name=company.canonical_name,
+        city=company.city, state=company.state,
+        places_description=segment.description,
+        sales_rationale=play.sales_rationale or "(general prospecting)",
+        ranked_roles=ranked_roles,
+        results_block=results_block,
+    )
+
+
+# Strict schema for the OpenAI extractor. Strict mode needs an object at the
+# top level and every property listed as required (nullable instead of
+# optional), so the array the prompt describes is wrapped in {"people": [...]}.
+_PEOPLE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "people": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "title": {"type": ["string", "null"]},
+                    "evidence_idx": {"type": "array", "items": {"type": "integer"}},
+                    "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                    "why_relevant": {"type": "string"},
+                },
+                "required": ["name", "title", "evidence_idx", "confidence", "why_relevant"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["people"],
+    "additionalProperties": False,
+}
+
+
+class OpenAIExtractor(LLMExtractor):
+    """
+    Stage 2 contact extraction on OpenAI (default ``gpt-6-luna``, reasoning
+    effort ``low``): a focused, high-volume extraction job, so the efficient
+    tier. Uses a strict JSON schema so a malformed reply can't silently become
+    "no contacts"; if the model rejects strict schemas, falls back to plain
+    JSON mode. Model and effort are overridable via DISCOVERY_MODEL /
+    DISCOVERY_REASONING_EFFORT.
+    """
+
+    def __init__(self, api_key: str | None = None, model: str | None = None,
+                 reasoning_effort: str | None = None, client=None):
+        self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
+        if not self.api_key and client is None:
+            raise ValueError("OPENAI_API_KEY not set")
+        self.model = model or os.environ.get("DISCOVERY_MODEL") or "gpt-6-luna"
+        self.reasoning_effort = (reasoning_effort
+                                 or os.environ.get("DISCOVERY_REASONING_EFFORT") or "low")
+        self._client = client
+
+    def _get_client(self):
+        if self._client is None:
+            from openai import OpenAI
+            self._client = OpenAI(api_key=self.api_key)
+        return self._client
+
+    def _create(self, prompt: str):
+        client = self._get_client()
+        common = dict(model=self.model, input=prompt,
+                      reasoning={"effort": self.reasoning_effort},
+                      max_output_tokens=6000)
+        try:
+            return client.responses.create(
+                text={"format": {"type": "json_schema", "name": "people",
+                                 "schema": _PEOPLE_SCHEMA, "strict": True}},
+                **common)
+        except Exception as ex:
+            msg = str(ex).lower()
+            if not any(k in msg for k in ("json_schema", "text.format", "response_format", "strict")):
+                raise
+            return client.responses.create(
+                text={"format": {"type": "json_object"}}, **common)
+
+    def extract(self, company, segment, play, results):
+        if not results:
+            return []
+        prompt = _build_extraction_prompt(company, segment, play, results).replace(
+            "Return ONLY a JSON array, no other text. If no people are mentioned, return [].",
+            'Return a JSON object of the form {"people": [ ...one object per person... ]}. '
+            'If no people are mentioned, return {"people": []}.',
+        )
+        resp = self._create(prompt)
+        text = getattr(resp, "output_text", None) or ""
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            print(f"[warn] OpenAI extractor returned non-JSON: {text[:200]}")
+            return []
+        people = parsed.get("people", []) if isinstance(parsed, dict) else parsed
+        return _parse_llm_candidates(people or [], company.canonical_name, results)
+
+
 class GeminiExtractor(LLMExtractor):
-    def __init__(self, api_key: str | None = None, model: str = "gemini-3.5-flash"):
+    """
+    Previous Stage 2 extractor, kept as a fallback (DISCOVERY_PROVIDER=gemini).
+    gemini-3.5-flash is deprecated (requests are routed to 3.6 Flash), so the
+    default is now gemini-3.8-flash with thinking level "low". Per Google's
+    Gemini 3 guidance, temperature is left at its default.
+    """
+
+    def __init__(self, api_key: str | None = None, model: str | None = None):
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
         if not self.api_key:
             raise ValueError("GEMINI_API_KEY not set")
-        self.model = model
+        self.model = model or os.environ.get("GEMINI_MODEL") or "gemini-3.8-flash"
 
     def extract(self, company, segment, play, results):
         import requests
         if not results:
             return []
-
-        results_block = "\n".join(
-            f"[{i}] {r.title}\n    {r.snippet}\n    ({r.url})"
-            for i, r in enumerate(results)
-        )
-        ranked_roles = "\n".join(
-            f"- {rr.role.display}" + (" (speculative probe)" if rr.is_probe else "")
-            for rr in play.roles
-        )
-        prompt = EXTRACTION_PROMPT.format(
-            searcher=play.searcher_display,
-            company_name=company.canonical_name,
-            city=company.city, state=company.state,
-            places_description=segment.description,
-            sales_rationale=play.sales_rationale or "(general prospecting)",
-            ranked_roles=ranked_roles,
-            results_block=results_block,
-        )
+        prompt = _build_extraction_prompt(company, segment, play, results)
         url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
                f"{self.model}:generateContent?key={self.api_key}")
         resp = requests.post(
             url,
             json={"contents": [{"parts": [{"text": prompt}]}],
-                  "generationConfig": {"temperature": 0.1,
-                                       "responseMimeType": "application/json"}},
-            timeout=30,
+                  "generationConfig": {"responseMimeType": "application/json",
+                                       "thinkingConfig": {"thinkingLevel": "low"}}},
+            timeout=60,
         )
         resp.raise_for_status()
         text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]

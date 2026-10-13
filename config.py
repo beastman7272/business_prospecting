@@ -32,8 +32,11 @@ class BaseConfig:
     GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY")
 
     # Provider keys. The app intentionally uses more than one provider:
-    #   - OpenAI  : Stage 1 intel, and Stage 3 DossierLLM (dossier_llm_openai.py)
-    #   - Gemini  : Stage 2 contact extraction (contact_discovery.GeminiExtractor)
+    #   - OpenAI  : Stage 1 intel (gpt-6.1-sol), Stage 2 contact extraction
+    #               (contact_discovery.OpenAIExtractor, gpt-6-luna) and the
+    #               Stage 3 DossierLLM (dossier_llm_openai.py)
+    #   - Gemini  : optional fallback for Stage 2 (DISCOVERY_PROVIDER=gemini)
+    #               and the profile generator (generator.py)
     #   - Brave   : Stage 2/3 web search (contact_discovery.BraveSearchProvider)
     # A full Stage 2 -> Stage 3 run touches all three, so all are first-class here.
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")

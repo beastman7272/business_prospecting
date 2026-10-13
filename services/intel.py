@@ -1,4 +1,5 @@
 import json
+import os
 from urllib.parse import urlparse
 
 from flask import current_app
@@ -129,7 +130,11 @@ Return ONLY the structured fields. If a field cannot be determined, return "Unkn
 """
 
     resp = client.responses.create(
-        model="gpt-5.5",
+        # Sol on low reasoning: near-flagship quality for the summary and the
+        # seller-aware angle without paying for deliberation the reading
+        # doesn't need. Overridable via ENRICH_MODEL / ENRICH_REASONING_EFFORT.
+        model=os.environ.get("ENRICH_MODEL") or "gpt-6.1-sol",
+        reasoning={"effort": os.environ.get("ENRICH_REASONING_EFFORT") or "low"},
         input=[{"role": "user", "content": prompt}],
         text={
             "format": {

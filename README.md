@@ -74,9 +74,9 @@ moved.
 | Variable | What it's for | Where to get it |
 | --- | --- | --- |
 | `GOOGLE_PLACES_API_KEY` | Stage 1 business discovery | Google Cloud Console → enable **Places API (New)**, then create an API key. https://console.cloud.google.com/ · docs: https://developers.google.com/maps/documentation/places/web-service |
-| `GEMINI_API_KEY` | Stage 2 contact extraction | Google AI Studio → **Get API key**. https://aistudio.google.com/app/apikey |
+| `GEMINI_API_KEY` | Optional: profile generator, or Stage 2 fallback (`DISCOVERY_PROVIDER=gemini`) | Google AI Studio → **Get API key**. https://aistudio.google.com/app/apikey |
 | `BRAVE_SEARCH_API_KEY` | Stage 2/3 web search | Brave Search API dashboard → subscribe (free tier available), create a key. https://api-dashboard.search.brave.com/ |
-| `OPENAI_API_KEY` | Stage 3 dossier LLM | OpenAI platform → **API keys**. https://platform.openai.com/api-keys |
+| `OPENAI_API_KEY` | Enrich (`gpt-6.1-sol`), contact discovery (`gpt-6-luna`), dossiers | OpenAI platform → **API keys**. https://platform.openai.com/api-keys |
 | `SECRET_KEY` | Flask session/CSRF signing key | Generate any long random string: `python -c "import secrets; print(secrets.token_hex(32))"`. Keep it stable (changing it invalidates existing sessions). |
 | `FLASK_APP` | Flask entry point | Set to `app:create_app` (not a secret). |
 | `FLASK_ENV` | Flask environment | `development` locally (not a secret). |
