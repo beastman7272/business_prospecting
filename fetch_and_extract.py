@@ -344,6 +344,9 @@ _DECORATIVE_IMG_WORDS = ("logo", "icon", "sprite", "badge", "flag", "arrow",
                          "spinner", "loader", "pixel", "tracking", "banner",
                          "button", "social", "rating", "star", "award")
 _NAME_ALT_RE = re.compile(r"^[A-Z][a-z'\-]+(?: [A-Z][a-z'\-.]+){1,3}$")
+# A year in an image's FILE NAME (not its folder path -- CMS upload folders
+# like /2023/05/ date the upload, not the photo), e.g. dr-smith-2021.jpg.
+_FILE_YEAR_RE = re.compile(r"(?<!\d)(19[89]\d|20[0-4]\d)(?!\d)")
 
 
 def audit_images(html: str) -> dict:
@@ -362,6 +365,7 @@ def audit_images(html: str) -> dict:
             tag.decompose()
         real = placeholder = no_source = 0
         named: list[str] = []
+        years: dict[str, int] = {}
         for img in soup.find_all("img"):
             src = (img.get("src") or img.get("data-src") or img.get("data-lazy-src")
                    or (img.get("srcset") or img.get("data-srcset") or "").split(" ")[0] or "")
@@ -379,8 +383,13 @@ def audit_images(html: str) -> dict:
                 real += 1
                 if _NAME_ALT_RE.match(alt) and len(named) < 10:
                     named.append(alt)
+                fname = src.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+                m = _FILE_YEAR_RE.search(fname)
+                years[m.group(1) if m else "undated"] = years.get(m.group(1) if m else "undated", 0) + 1
         return {"real": real, "placeholder": placeholder, "no_source": no_source,
-                "total": real + placeholder + no_source, "named_photos": named}
+                "total": real + placeholder + no_source, "named_photos": named,
+                # only meaningful when at least one file name carries a year
+                "photo_years": years if any(k != "undated" for k in years) else {}}
     except Exception:
         return {}
 

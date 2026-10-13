@@ -733,30 +733,57 @@ def _own_link_score(link: dict, first: str, last: str) -> int:
     return score_people_link(link, first, last)
 
 
-def team_photo_check(fr, url: str) -> dict | None:
+# Words in a page's address or title that mark it as a people page. Medical,
+# dental and legal sites name these pages after the profession
+# ("gwinnett-pediatricians.php", "Our Physicians") rather than "team".
+_PEOPLE_PAGE_TITLE_WORDS = (
+    "team", "staff", "people", "meet", "leadership", "about", "our-firm",
+    "provider", "physician", "pediatrician", "doctor", "dentist", "orthodont",
+    "clinician", "therapist", "practitioner", "attorney", "lawyer", "agents",
+    "advisor", "partners", "bios", "directory", "management",
+)
+
+
+def team_photo_check(fr, url: str, via_people_link: bool = False) -> dict | None:
     """
-    Site signal "team_photos": on a page that looks like a team/staff page,
-    how many photo slots hold a real photo vs a placeholder vs nothing.
-    None when the page isn't a people page or shows too few images to say.
+    Site signal "team_photos": on a team/staff/providers page, how many photo
+    slots hold a real photo vs a placeholder vs nothing -- plus, when image
+    file names carry years (dr-smith-2021.jpg), how many come from each year.
+    A page counts as a people page if the crawl reached it through a people
+    link ("Meet Our Staff", "Providers"), if its address/title says so, or if
+    it shows several placeholder/missing photo slots.
+    None when it isn't a people page or shows too few images to say.
     """
     audit = getattr(fr, "image_audit", None) or {}
     total = audit.get("total", 0)
+    real = audit.get("real", 0)
     stand_ins = audit.get("placeholder", 0) + audit.get("no_source", 0)
-    looks_people = any(w in f"{url} {fr.title or ''}".lower()
-                       for w in ("team", "staff", "people", "meet", "leadership",
-                                 "about", "our-firm", "providers", "attorneys", "agents"))
+    looks_people = via_people_link or any(
+        w in f"{url} {fr.title or ''}".lower() for w in _PEOPLE_PAGE_TITLE_WORDS)
     if total < 3 or not (looks_people or stand_ins >= 3):
         return None
-    summary = (
-        f"[Team-page photo check: {total} content image slots on this page -- "
-        f"{audit.get('real', 0)} real photos, {audit.get('placeholder', 0)} placeholder/"
-        f"silhouette images, {audit.get('no_source', 0)} with no image source "
-        "(usually a photo never added; occasionally script-loaded, so verify by "
-        "viewing the page).]"
-    )
-    return {"url": fr.final_url or url, "real": audit.get("real", 0),
+    years = audit.get("photo_years") or {}
+    dated = {y: n for y, n in years.items() if y != "undated"}
+    year_note = ""
+    if dated:
+        parts = [f"{y}: {n}" for y, n in sorted(dated.items())]
+        if years.get("undated"):
+            parts.append(f"no year: {years['undated']}")
+        year_note = (" Years in the photo file names (" + ", ".join(parts) +
+                     ") suggest the photos were taken at different times.")
+    if stand_ins == 0:
+        status = (f"all {real} have real photos -- so the angle is consistency or a "
+                  "refresh, not missing photos.")
+    else:
+        status = (f"{real} real photos, {audit.get('placeholder', 0)} placeholder/"
+                  f"silhouette images, {audit.get('no_source', 0)} with no image source "
+                  "(usually a photo never added; occasionally script-loaded, so verify "
+                  "by viewing the page).")
+    summary = f"[Team-page photo check: {total} photo slots on this page; {status}{year_note}]"
+    return {"url": fr.final_url or url, "real": real,
             "placeholder": audit.get("placeholder", 0),
             "no_source": audit.get("no_source", 0), "total": total,
+            "photo_years": dated, "undated": years.get("undated", 0) if dated else None,
             "summary": summary}
 
 
@@ -789,7 +816,7 @@ def crawl_own_site(
     seen_final: set[str] = set()
     links: list[dict] = []
 
-    def visit(url: str) -> None:
+    def visit(url: str, via_people_link: bool = False) -> None:
         key = _norm_url(url)
         if not key or key in seen:
             return
@@ -816,7 +843,7 @@ def crawl_own_site(
             text += "\n[Contact details elsewhere on this page (header/footer/links): " + \
                     "; ".join(extra) + "]"
         if "team_photos" in (signals or []):
-            photo = team_photo_check(fr, url)
+            photo = team_photo_check(fr, url, via_people_link=via_people_link)
             if photo:
                 entry["team_photos"] = photo
                 text += "\n" + photo["summary"]
@@ -841,10 +868,12 @@ def crawl_own_site(
             k = _norm_url(href)
             if k not in candidates or candidates[k][0] < score:
                 candidates[k] = (score, href)
-    for _, href in sorted(candidates.values(), key=lambda t: -t[0]):
+    for score, href in sorted(candidates.values(), key=lambda t: -t[0]):
         if len(docs) >= max_pages:
             break
-        visit(href)
+        # score >= 2 means the link itself named a people page ("Providers",
+        # "Meet Our Staff"); "Contact" alone (1) doesn't count.
+        visit(href, via_people_link=score >= 2)
 
     if not candidates:
         for u in seeds[1:]:

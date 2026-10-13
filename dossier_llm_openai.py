@@ -547,7 +547,11 @@ Task: write a short cold-outreach brief for the seller above.
   checkable evidence: cite the page URL and the numbers. Because "no image
   source" can occasionally mean script-loaded photos, phrase it so it holds
   up ("your staff page shows placeholders for most of the team") and add an
-  open question to confirm by viewing the page.
+  open question to confirm by viewing the page. If every slot has a real
+  photo, do NOT imply photos are missing: the angle is consistency across the
+  team, photos taken at different times (see photo_years when present), or
+  keeping new hires matching -- and say the look of the photos should be
+  checked by eye.
 - why_now: a concrete timing reason if the findings support one (new
   business, recent move, recent post, growth), else null. Do not invent one.
 - avoid: things that would land badly (e.g. leading with a detail only seen

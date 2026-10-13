@@ -426,6 +426,61 @@ def main():
           and not any("Team-page photo check" in doc.text for doc in llm3.seen["background"]))
     os.environ["SEARCHER"] = "photographer"
 
+    print("\nPediatrics: photo check on a 'Providers' page with all photos present")
+    P = "https://www.gwinnettpeds.com/"
+    PROV = P + "gwinnett-pediatricians.php"
+    names = ["suzanne-molock", "sharon-steele", "yvette-quisling-2021", "lisa-roberts-2021",
+             "keyana-washington-2021", "yolanda-johnson-2022"] + [f"doc-{i}" for i in range(19)]
+    prov_html = ("<html><head><title>Gwinnett Pediatricians</title></head><body>"
+                 + "".join(f'<div><img src="/images/dr-{n}.jpg" alt=""><h3>Dr {n}</h3></div>' for n in names)
+                 + '<img src="/wp-content/uploads/2019/03/office.jpg" alt="">'
+                 + "</body></html>")
+    audit = audit_images(prov_html)
+    check("file-name years counted; upload-folder years ignored",
+          audit["real"] == 26 and audit["photo_years"] == {"2021": 3, "2022": 1, "undated": 22},
+          str(audit["photo_years"]))
+
+    ped_pages = {
+        P: ("Gwinnett Pediatrics", "Pediatric care in Gwinnett.",
+            [{"href": PROV, "text": "Providers"}, {"href": P + "about-us.php", "text": "About GPAM"}], {}),
+        PROV: ("Our Providers", "Dr. Suzanne Molock, MD. Dr. Sharon Steele, MD.", [], audit),
+        P + "about-us.php": ("About", "Founded in 1974.", [], {}),
+    }
+
+    class PedFetcher:
+        def fetch(self, url):
+            if url not in ped_pages:
+                return FetchResult(url=url, ok=False, error="http_404")
+            t, txt, links, a = ped_pages[url]
+            return FetchResult(url=url, ok=True, final_url=url, status_code=200, title=t,
+                               text=txt, links=links, image_audit=a)
+
+    peds = CompanyInput(canonical_name="Gwinnett Pediatrics & Adolescent Medicine", input_name="x",
+                        city="Lawrenceville", state="GA", places_type="doctor", website=P,
+                        domain="gwinnettpeds.com")
+    molock = ContactCandidate(name="Suzanne Molock", title="Pediatrician", company=peds.canonical_name)
+    llm4 = MockDossierLLM(signals=PersonSignals(present_urls=[PROV]))
+    d4 = build_dossier(molock, peds, search=FixtureSearch(), fetcher=PedFetcher(), llm=llm4,
+                       engagement_researcher=MockEngagementResearcher(),
+                       seller=seller_context_for(peds), min_seniority=0)
+    tp4 = d4.research_log.get("site_signals", {}).get("team_photos", [])
+    check("check runs on a page reached via a 'Providers' link (no 'team' in its address)",
+          tp4 and tp4[0]["url"] == PROV and tp4[0]["real"] == 26 and tp4[0]["placeholder"] == 0, str(tp4))
+    ev_text = " ".join(doc.text for doc in llm4.seen["background"])
+    check("all-photos case framed as consistency, not missing photos",
+          "consistency or a refresh, not missing photos" in ev_text and "different times" in ev_text)
+
+    class FakeFR:
+        title = "Our Physicians"
+        final_url = None
+        image_audit = {"real": 5, "placeholder": 0, "no_source": 0, "total": 5}
+    from contact_dossier import team_photo_check
+    check("profession words in a page title count as a people page",
+          team_photo_check(FakeFR(), "https://x.com/page-12.php") is not None)
+    FakeFR.title = "Services"
+    check("ordinary pages with real images are not reported",
+          team_photo_check(FakeFR(), "https://x.com/services.php") is None)
+
     ok = all(checks)
     print(f"\n{sum(checks)}/{len(checks)} checks passed")
     return 0 if ok else 1
