@@ -133,6 +133,9 @@ class FetchResult:
     # visible text of header/footer, which `text` strips. Small-business sites
     # often list their only email in the footer.
     contacts: dict = field(default_factory=dict)
+    # Counts of content images by kind (real / placeholder / no source), for
+    # signals like "staff page with no photos". See audit_images().
+    image_audit: dict = field(default_factory=dict)
     fetched_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -330,6 +333,58 @@ def extract_contacts(html: str) -> dict:
     return {"emails": emails[:20], "phones": phones[:20]}
 
 
+# Image src/class/alt fragments that mark a stand-in rather than a photo.
+_PLACEHOLDER_IMG_WORDS = ("placeholder", "silhouette", "default-avatar",
+                          "avatar-default", "default_avatar", "no-photo",
+                          "nophoto", "no_photo", "no-image", "noimage",
+                          "no_image", "blank", "person-icon", "user-icon",
+                          "generic-person", "missing", "coming-soon")
+# ...and ones that mark decoration (skipped entirely).
+_DECORATIVE_IMG_WORDS = ("logo", "icon", "sprite", "badge", "flag", "arrow",
+                         "spinner", "loader", "pixel", "tracking", "banner",
+                         "button", "social", "rating", "star", "award")
+_NAME_ALT_RE = re.compile(r"^[A-Z][a-z'\-]+(?: [A-Z][a-z'\-.]+){1,3}$")
+
+
+def audit_images(html: str) -> dict:
+    """
+    Count the page's content images (outside header/nav/footer, decoration
+    skipped) as: real (has a source), placeholder (a stand-in image such as
+    portrait-placeholder.png or a silhouette), or no_source (an <img> with
+    no usable src -- usually a photo never set, though script-loaded images
+    can look the same). Also returns alt texts that look like person names.
+    Never raises; {} on failure.
+    """
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, "html.parser")
+        for tag in soup(["header", "nav", "footer", "script", "noscript", "template"]):
+            tag.decompose()
+        real = placeholder = no_source = 0
+        named: list[str] = []
+        for img in soup.find_all("img"):
+            src = (img.get("src") or img.get("data-src") or img.get("data-lazy-src")
+                   or (img.get("srcset") or img.get("data-srcset") or "").split(" ")[0] or "")
+            src = src.strip()
+            alt = (img.get("alt") or "").strip()
+            cls = " ".join(img.get("class") or [])
+            blob = f"{src} {cls} {alt}".lower()
+            if any(w in blob for w in _DECORATIVE_IMG_WORDS):
+                continue
+            if any(w in blob for w in _PLACEHOLDER_IMG_WORDS):
+                placeholder += 1
+            elif not src or (src.startswith("data:") and len(src) < 300):
+                no_source += 1
+            else:
+                real += 1
+                if _NAME_ALT_RE.match(alt) and len(named) < 10:
+                    named.append(alt)
+        return {"real": real, "placeholder": placeholder, "no_source": no_source,
+                "total": real + placeholder + no_source, "named_photos": named}
+    except Exception:
+        return {}
+
+
 def extract_main_text(html: str) -> tuple[str | None, str]:
     """
     Turn raw HTML into (title, clean_text). Uses BeautifulSoup if available,
@@ -506,6 +561,7 @@ class PageFetcher:
         result.text = text
         result.links = extract_links(html, result.final_url or url)
         result.contacts = extract_contacts(html)
+        result.image_audit = audit_images(html)
         result.ok = True
         return result
 

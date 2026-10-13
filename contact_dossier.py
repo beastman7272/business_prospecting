@@ -47,6 +47,8 @@ from contact_discovery import (
     normalize_domain,
     _get_domain,
     _own_domain_seed_urls,
+    PEOPLE_PAGE_WORDS,
+    score_people_link,
 )
 from fetch_and_extract import PageFetcher, is_placeholder_email
 from active_profile import get_active_profile
@@ -164,6 +166,7 @@ class SellerContext:
     sales_rationale: str = ""
     segment_id: str = ""
     target_roles: list[str] = field(default_factory=list)
+    site_signals: list[str] = field(default_factory=list)   # e.g. ["team_photos"]
 
 
 @dataclass
@@ -717,11 +720,9 @@ _GENERIC_CO_WORDS = {"company", "group", "services", "service", "solutions",
                      "and", "inc", "llc", "corp", "center", "centre"}
 
 
-# Words in a link's text/path that suggest a page about the firm's people.
-_PERSON_PAGE_WORDS = ("about", "team", "meet", "story", "bio", "staff",
-                      "founder", "leadership", "people", "who-we-are",
-                      "who we are", "our-firm", "principal", "attorney",
-                      "doctor", "provider", "owner")
+# People-page words + link scoring are shared with Stage 2 discovery
+# (contact_discovery.PEOPLE_PAGE_WORDS / score_people_link).
+_PERSON_PAGE_WORDS = PEOPLE_PAGE_WORDS
 
 
 def _norm_url(url: str) -> str:
@@ -729,17 +730,34 @@ def _norm_url(url: str) -> str:
 
 
 def _own_link_score(link: dict, first: str, last: str) -> int:
-    blob = f"{link.get('text') or ''} {urlparse(link.get('href') or '').path}".lower()
-    score = 0
-    if last and last in blob:
-        score += 5
-    if first and first in blob:
-        score += 3
-    if any(w in blob for w in _PERSON_PAGE_WORDS):
-        score += 2
-    if "contact" in blob:
-        score += 1
-    return score
+    return score_people_link(link, first, last)
+
+
+def team_photo_check(fr, url: str) -> dict | None:
+    """
+    Site signal "team_photos": on a page that looks like a team/staff page,
+    how many photo slots hold a real photo vs a placeholder vs nothing.
+    None when the page isn't a people page or shows too few images to say.
+    """
+    audit = getattr(fr, "image_audit", None) or {}
+    total = audit.get("total", 0)
+    stand_ins = audit.get("placeholder", 0) + audit.get("no_source", 0)
+    looks_people = any(w in f"{url} {fr.title or ''}".lower()
+                       for w in ("team", "staff", "people", "meet", "leadership",
+                                 "about", "our-firm", "providers", "attorneys", "agents"))
+    if total < 3 or not (looks_people or stand_ins >= 3):
+        return None
+    summary = (
+        f"[Team-page photo check: {total} content image slots on this page -- "
+        f"{audit.get('real', 0)} real photos, {audit.get('placeholder', 0)} placeholder/"
+        f"silhouette images, {audit.get('no_source', 0)} with no image source "
+        "(usually a photo never added; occasionally script-loaded, so verify by "
+        "viewing the page).]"
+    )
+    return {"url": fr.final_url or url, "real": audit.get("real", 0),
+            "placeholder": audit.get("placeholder", 0),
+            "no_source": audit.get("no_source", 0), "total": total,
+            "summary": summary}
 
 
 def crawl_own_site(
@@ -749,6 +767,7 @@ def crawl_own_site(
     *,
     max_pages: int = 6,
     per_page_chars: int = 6000,
+    signals: list[str] | None = None,
 ) -> tuple[list[Doc], list[dict]]:
     """
     Read the company's own site the way a person would: Stage 2's own-domain
@@ -796,6 +815,11 @@ def crawl_own_site(
         if extra:
             text += "\n[Contact details elsewhere on this page (header/footer/links): " + \
                     "; ".join(extra) + "]"
+        if "team_photos" in (signals or []):
+            photo = team_photo_check(fr, url)
+            if photo:
+                entry["team_photos"] = photo
+                text += "\n" + photo["summary"]
         docs.append(Doc(fr.final_url or url, text,
                         fr.fetched_at, "own_domain_page", "own_site"))
 
@@ -894,6 +918,7 @@ def collect_evidence(
     own_docs, crawl_log = crawl_own_site(
         contact, company, get_page,
         max_pages=max_own_pages, per_page_chars=per_page_chars,
+        signals=(seller.site_signals if seller else None),
     )
 
     results: list[SearchResult] = []
@@ -986,6 +1011,7 @@ def seller_context_for(company: CompanyInput) -> SellerContext | None:
             sales_rationale=play.sales_rationale if play else "",
             segment_id=segment.segment_id,
             target_roles=[rr.role.key for rr in play.roles] if play else [],
+            site_signals=list(getattr(profile, "site_signals", []) or []),
         )
     except Exception:
         return None
@@ -1309,6 +1335,10 @@ def build_dossier(
             for r in evidence.results[:80]
         ],
     }
+    photos = [p["team_photos"] for p in evidence.crawl_log if p.get("team_photos")]
+    if photos:
+        research_log["site_signals"] = {"team_photos": [
+            {k: v for k, v in ph.items() if k != "summary"} for ph in photos]}
     if not evidence.own_docs:
         warnings.append("could not read any page on the company's own website")
 
@@ -1399,6 +1429,9 @@ def build_dossier(
             "reach_channels": sorted({r.kind for r in reach}),
             "engagement_status": research_log["engagement"]["status"],
         }
+        if photos:
+            findings["team_photos"] = [
+                {k: v for k, v in ph.items() if k != "summary"} for ph in photos]
         outreach = run_outreach(contact, company, llm, findings, seller=seller)
     except Exception as ex:
         warnings.append(f"outreach synthesis failed: {ex}")

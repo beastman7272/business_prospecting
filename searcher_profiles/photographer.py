@@ -57,6 +57,9 @@ PHOTOGRAPHER_PROFILE = SearcherProfile(
         "image-continuity program embedded in onboarding and "
         "leadership-refresh cycles."
     ),
+    # Staff pages full of silhouettes or blank photo slots are the clearest
+    # sign a business needs headshots now.
+    site_signals=["team_photos"],
     plays={
         "professional_services_office": _p("professional_services_office",
             ["marketing_director", "hr_director", "office_manager", "communications_director", "operations_director", "managing_partner", "owner", "administrator"]),

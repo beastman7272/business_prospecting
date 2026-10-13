@@ -542,6 +542,12 @@ Task: write a short cold-outreach brief for the seller above.
   never the whole pitch.
 - likely_needs: 1-3 hypotheses about what this prospect might need from the
   seller, phrased as hypotheses and grounded in the findings.
+- If the findings include "team_photos" (a count of real vs placeholder vs
+  missing photos on the prospect's team/staff page), treat it as concrete,
+  checkable evidence: cite the page URL and the numbers. Because "no image
+  source" can occasionally mean script-loaded photos, phrase it so it holds
+  up ("your staff page shows placeholders for most of the team") and add an
+  open question to confirm by viewing the page.
 - why_now: a concrete timing reason if the findings support one (new
   business, recent move, recent post, growth), else null. Do not invent one.
 - avoid: things that would land badly (e.g. leading with a detail only seen

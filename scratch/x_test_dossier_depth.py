@@ -21,7 +21,7 @@ os.environ["SEARCHER"] = "photographer"
 from contact_discovery import CompanyInput, ContactCandidate, SearchResult, SearchProvider
 from fetch_and_extract import FetchResult, extract_links
 from contact_dossier import (
-    BackgroundFact, EngagementItem, MockDossierLLM, MockPersonSearch, OutreachAngle, OutreachBrief,
+    BackgroundFact, EngagementItem, MockDossierLLM, MockEngagementResearcher, MockPersonSearch, OutreachAngle, OutreachBrief,
     PersonSignals, RapportHook, SpineEngagementResearcher, ThrottledSearchProvider,
     build_dossier, build_research_queries, dossier_to_dict, focus_text,
 )
@@ -354,6 +354,77 @@ def main():
           seg.segment_id)
     check("seller description no longer says only tech/finance/law",
           "dealership" in get_profile("photographer").description)
+
+    print("\nDealership: discovery follows site links; team-photo signal per profile")
+    from fetch_and_extract import audit_images
+    from contact_discovery import fetch_own_domain_pages
+    from contact_dossier import seller_context_for
+    D = "https://www.gwinnettplacenissan.com/"
+    STAFF = D + "dealership/staff.htm"
+    staff_html = ("<html><head><title>Meet Our Staff</title></head><body>"
+                  + "".join(f'<div><img src="https://pictures.dealer.com/portrait-placeholder-v1.png" alt="x"><h3>Person {i}</h3><p>Sales</p></div>' for i in range(21))
+                  + "".join(f'<div><img alt="Staff photo"><h3>Tech {i}</h3></div>' for i in range(38))
+                  + "<p>Michael Cappelluti, General Manager</p></body></html>")
+    dealer_pages = {
+        D: ("Gwinnett Place Nissan", "New and used Nissan in Duluth.",
+            [{"href": D + "dealership/about.htm", "text": "About Us"},
+             {"href": STAFF, "text": "Meet Our Staff"},
+             {"href": D + "new-inventory/index.htm", "text": "New Inventory"},
+             {"href": D + "contact.htm", "text": "Contact Us"}], {}),
+        STAFF: ("Meet Our Staff", "Michael Cappelluti General Manager. Person 0 Sales. ...", [],
+                audit_images(staff_html)),
+        D + "dealership/about.htm": ("About", "About Gwinnett Place Nissan.", [], {}),
+        D + "contact.htm": ("Contact", "Call us.", [], {}),
+    }
+
+    class DealerFetcher:
+        def __init__(self): self.log = []
+        def fetch(self, url):
+            self.log.append(url)
+            if url not in dealer_pages:
+                return FetchResult(url=url, ok=False, error="http_404")
+            t, txt, links, audit = dealer_pages[url]
+            return FetchResult(url=url, ok=True, final_url=url, status_code=200, title=t,
+                               text=txt, links=links, image_audit=audit)
+
+    dealer = CompanyInput(canonical_name="Gwinnett Place Nissan", input_name="x", city="Duluth",
+                          state="GA", places_type="car_dealer", website=D,
+                          domain="gwinnettplacenissan.com")
+    df = DealerFetcher()
+    pages, _ = fetch_own_domain_pages(dealer, [], df, max_pages=8)
+    check("discovery follows 'Meet Our Staff' to /dealership/staff.htm",
+          STAFF in [p.url for p in pages], str(df.log))
+    check("discovery skips inventory links and blind path guesses",
+          not any(u.endswith(("/about", "/team", "/our-team", "new-inventory/index.htm")) for u in df.log),
+          str(df.log))
+
+    gm = ContactCandidate(name="Michael Cappelluti", title="General Manager",
+                          company="Gwinnett Place Nissan", evidence=[{"url": STAFF}])
+    os.environ["SEARCHER"] = "photographer"
+    photog = seller_context_for(dealer)
+    check("photographer seller context enables team_photos", photog.site_signals == ["team_photos"])
+    llm2 = MockDossierLLM(signals=PersonSignals(present_urls=[STAFF]))
+    d2 = build_dossier(gm, dealer, search=FixtureSearch(), fetcher=DealerFetcher(), llm=llm2,
+                       engagement_researcher=MockEngagementResearcher(), seller=photog,
+                       min_seniority=0)
+    tp = d2.research_log.get("site_signals", {}).get("team_photos", [])
+    check("photo check counts 0 real / 21 placeholder / 38 missing on the staff page",
+          tp and tp[0]["url"] == STAFF and (tp[0]["real"], tp[0]["placeholder"], tp[0]["no_source"]) == (0, 21, 38),
+          str(tp))
+    check("photo check reaches the evidence and the outreach findings",
+          any("Team-page photo check" in doc.text for doc in llm2.seen["background"])
+          and llm2.seen["outreach_findings"].get("team_photos"))
+
+    os.environ["SEARCHER"] = "accountant"
+    acct = seller_context_for(dealer)
+    llm3 = MockDossierLLM(signals=PersonSignals(present_urls=[STAFF]))
+    d3 = build_dossier(gm, dealer, search=FixtureSearch(), fetcher=DealerFetcher(), llm=llm3,
+                       engagement_researcher=MockEngagementResearcher(), seller=acct,
+                       min_seniority=0)
+    check("other profiles don't get the photo check",
+          acct.site_signals == [] and "site_signals" not in d3.research_log
+          and not any("Team-page photo check" in doc.text for doc in llm3.seen["background"]))
+    os.environ["SEARCHER"] = "photographer"
 
     ok = all(checks)
     print(f"\n{sum(checks)}/{len(checks)} checks passed")

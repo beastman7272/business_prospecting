@@ -835,10 +835,19 @@ function renderDossier(contactId, d) {
          Researched with ${queries.length} search${queries.length === 1 ? "" : "es"} (${log.search_results ?? 0} unique results) and ${pagesRead} page${pagesRead === 1 ? "" : "s"} of the company site${log.seller ? ` · for ${escapeHtml(log.seller)} profile` : ""}.${attrText ? ` Findings came from: ${escapeHtml(attrText)}.` : ""}</p>`
     : "";
 
+  const photoChecks = ((log.site_signals || {}).team_photos || []);
+  const photoHtml = photoChecks.length
+    ? `<div class="dossier-block"><h5>Team-page photos</h5><ul class="dossier-list">${photoChecks.map(p => `
+        <li>${p.real} real photo${p.real === 1 ? "" : "s"} of ${p.total} image slots
+          (${p.placeholder} placeholder, ${p.no_source} with no image) ${provLink(p.url)}
+          <span class="reach-note">Counted from the page's code; open the page to confirm.</span></li>`).join("")}</ul></div>`
+    : "";
+
   panel.innerHTML = `
     <div class="dossier">
       ${gateHtml}
       ${renderOutreach(d.outreach)}
+      ${photoHtml}
       ${section("Reach", reachHtml, "No reach info found.")}
       ${section("Background", bgHtml, "No background facts.")}
       ${section("Rapport (self-published)", rapportHtml, "No self-published personal details found.")}

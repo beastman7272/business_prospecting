@@ -49,6 +49,12 @@ class SearcherProfile:
     description: str                              # plain-English; also the
                                                   # seed the generator writes from
     plays: dict[str, SegmentPlay] = field(default_factory=dict)  # by segment_id
+    # Optional site checks that only matter to this kind of seller, switched on
+    # per profile so other sellers' dossiers aren't cluttered with them.
+    #   "team_photos" -- count real vs placeholder/missing photos on the
+    #                    prospect's team/staff pages (a headshot photographer's
+    #                    best "why now").
+    site_signals: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

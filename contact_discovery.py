@@ -522,31 +522,96 @@ def _own_domain_seed_urls(company) -> list[str]:
     return [urljoin(root, p) for p in OWN_DOMAIN_SEED_PATHS]
 
 
+# Words in a link's text or path that suggest a page about the firm's people.
+# Shared by Stage 2 (this file) and the Stage 3 dossier crawl.
+PEOPLE_PAGE_WORDS = ("about", "team", "meet", "staff", "story", "bio",
+                     "founder", "leadership", "people", "who-we-are",
+                     "who we are", "our-firm", "principal", "attorney",
+                     "lawyers", "doctor", "provider", "owner", "directory",
+                     "management", "agents", "professionals")
+
+
+def _norm_own_url(url: str) -> str:
+    return (url or "").split("#", 1)[0].rstrip("/").lower()
+
+
+def score_people_link(link: dict, first: str = "", last: str = "") -> int:
+    """
+    How likely a link leads to a page naming the business's people: the
+    person's name in it scores highest (when known), then about/team/staff
+    words, then "contact". 0 = not worth following.
+    """
+    from urllib.parse import urlparse
+    blob = f"{link.get('text') or ''} {urlparse(link.get('href') or '').path}".lower()
+    score = 0
+    if last and last in blob:
+        score += 5
+    if first and first in blob:
+        score += 3
+    if any(w in blob for w in PEOPLE_PAGE_WORDS):
+        score += 2
+    if "contact" in blob:
+        score += 1
+    return score
+
+
 def fetch_own_domain_pages(company, raw_results, fetcher, max_pages=8, per_page_chars=6000):
+    """
+    Read the company's own site the way a person would: own-domain pages the
+    searches surfaced and the homepage first, then the site's OWN links that
+    look like people pages (e.g. Dealer.com's /dealership/staff.htm, a
+    Squarespace /team), and only if the site exposes no such links, blind
+    guesses at common paths (/about, /team, ...). Guessing alone missed a
+    59-person staff page at a dealership.
+    Returns (page_results as SearchResults, all FetchResults).
+    """
     dom = normalize_domain(company.domain)
     if not dom:
         return [], []
-    urls, seen = [], set()
-    # Own-domain pages surfaced by search first (they matched a role query),
-    # then the seed pages on the known website.
-    candidates = [r.url for r in raw_results if _get_domain(r.url) == dom]
-    candidates += _own_domain_seed_urls(company)
-    for url in candidates:
-        key = url.rstrip("/").lower()
-        if key in seen:
-            continue
+    seeds = _own_domain_seed_urls(company)          # homepage first
+
+    fetched: list = []
+    seen: set[str] = set()
+    links: list[dict] = []
+    pages = 0
+
+    def visit(url: str) -> None:
+        nonlocal pages
+        key = _norm_own_url(url)
+        if not key or key in seen or pages >= max_pages:
+            return
         seen.add(key)
-        urls.append(url)
-        if len(urls) >= max_pages:
-            break
-    if not urls:
-        return [], []
-    fetched = fetcher.fetch_many(urls)
+        fr = fetcher.fetch(url.split("#", 1)[0])
+        fetched.append(fr)
+        pages += 1
+        if fr.ok:
+            seen.add(_norm_own_url(fr.final_url or url))
+            links.extend(getattr(fr, "links", None) or [])
+
+    for url in [r.url for r in raw_results if _get_domain(r.url) == dom] + seeds[:1]:
+        visit(url)
+
+    candidates: dict[str, tuple[int, str]] = {}
+    for link in links:
+        href = link.get("href") or ""
+        if _get_domain(href) != dom or _norm_own_url(href) in seen:
+            continue
+        score = score_people_link(link)
+        if score > 0:
+            k = _norm_own_url(href)
+            if k not in candidates or candidates[k][0] < score:
+                candidates[k] = (score, href)
+    for _, href in sorted(candidates.values(), key=lambda t: -t[0]):
+        visit(href)
+    if not candidates:
+        for url in seeds[1:]:
+            visit(url)
+
     page_results, seen_final = [], set()
     for fr in fetched:
         if not (fr.ok and fr.text):
             continue
-        final = (fr.final_url or fr.url).rstrip("/").lower()
+        final = _norm_own_url(fr.final_url or fr.url)
         if final in seen_final:      # e.g. /about-us redirecting to /about
             continue
         seen_final.add(final)
