@@ -707,7 +707,7 @@ async function rebuildDossier(contactId, btn) {
   const original = btn.textContent;
   btn.disabled = true;
   btn.textContent = "Rebuilding…";
-  panel.innerHTML = `<p class="empty-msg">Rebuilding dossier — researching the company site and the web, then writing the outreach brief (about a minute)…</p>`;
+  panel.innerHTML = `<p class="empty-msg">Rebuilding dossier — researching the company site and the web (about a minute)…</p>`;
   panel.classList.remove("hidden");
   try {
     const resp = await fetch(`/api/contacts/${contactId}/dossier`, { method: "POST" });
@@ -732,34 +732,6 @@ function provLink(url) {
 function identityBadge(level) {
   if (!level || level === "confirmed") return "";
   return `<span class="id-badge id-${slugify(level)}" title="Same name, but not confirmed to be this person">${escapeHtml(level)} match</span>`;
-}
-
-function renderOutreach(o) {
-  if (!o) return "";
-  const list = (items) => (items || []).map(x => `<li>${escapeHtml(x)}</li>`).join("");
-  const angles = (o.angles || []).map(a => `
-    <li class="angle">
-      <strong>${escapeHtml(a.angle)}</strong>
-      <div class="angle-opener">“${escapeHtml(a.opener)}”</div>
-      ${a.rationale ? `<div class="eng-rel">${escapeHtml(a.rationale)}</div>` : ""}
-      ${(a.evidence || []).map(u => provLink(u)).join(" ")}
-    </li>`).join("");
-  const sub = (label, inner) => inner ? `<div class="brief-sub"><h6>${label}</h6><ul class="dossier-list">${inner}</ul></div>` : "";
-  const meta = [
-    o.why_now ? `<div><b>Why now:</b> ${escapeHtml(o.why_now)}</div>` : "",
-    o.channel ? `<div><b>Channel:</b> ${escapeHtml(o.channel)}</div>` : "",
-    o.tone ? `<div><b>Tone:</b> ${escapeHtml(o.tone)}</div>` : "",
-  ].join("");
-  if (!angles && !meta && !(o.likely_needs || []).length) return "";
-  return `
-    <div class="dossier-block outreach-brief">
-      <h5>Outreach brief</h5>
-      ${angles ? `<ul class="dossier-list">${angles}</ul>` : ""}
-      ${meta ? `<div class="brief-meta">${meta}</div>` : ""}
-      ${sub("Likely needs (hypotheses)", list(o.likely_needs))}
-      ${sub("Avoid", list(o.avoid))}
-      ${sub("Check before relying on", list(o.open_questions))}
-    </div>`;
 }
 
 function renderDossier(contactId, d) {
@@ -847,7 +819,6 @@ function renderDossier(contactId, d) {
   panel.innerHTML = `
     <div class="dossier">
       ${gateHtml}
-      ${renderOutreach(d.outreach)}
       ${photoHtml}
       ${section("Reach", reachHtml, "No reach info found.")}
       ${section("Background", bgHtml, "No background facts.")}

@@ -163,7 +163,7 @@ def main():
     ])
     d = build_dossier(CONTACT, COMPANY, search=search, fetcher=fetcher, llm=llm,
                       engagement_researcher=SpineEngagementResearcher(search, fetcher, llm),
-                      person_search=web, min_seniority=0)
+                      person_search=web, min_seniority=0, outreach_brief=True)
 
     check("ran 5 searches", len(search.queries) == 5)
     li = next(q for q in d.research_log["queries"] if q["purpose"] == "linkedin")
@@ -411,9 +411,9 @@ def main():
     check("photo check counts 0 real / 21 placeholder / 38 missing on the staff page",
           tp and tp[0]["url"] == STAFF and (tp[0]["real"], tp[0]["placeholder"], tp[0]["no_source"]) == (0, 21, 38),
           str(tp))
-    check("photo check reaches the evidence and the outreach findings",
+    check("photo check reaches the evidence; brief is off by default",
           any("Team-page photo check" in doc.text for doc in llm2.seen["background"])
-          and llm2.seen["outreach_findings"].get("team_photos"))
+          and d2.outreach is None and "outreach_findings" not in llm2.seen)
 
     os.environ["SEARCHER"] = "accountant"
     acct = seller_context_for(dealer)

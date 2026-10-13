@@ -106,7 +106,6 @@ def score(d):
              for f in d.background for w in ("cbtcpa", "carmichael", "brasher", "tuvell"))),
         ("Cooper / music / travel captured as rapport",
          any(w in json.dumps([h.detail for h in d.rapport]).lower() for w in ("cooper", "music", "travel"))),
-        ("Outreach brief has 2+ cited angles", d.outreach is not None and len(d.outreach.angles) >= 2),
         ("Background is about Steven, not the service list",
          not any("pricing" in f.claim.lower() or "tiers" in f.claim.lower() for f in d.background)),
     ):

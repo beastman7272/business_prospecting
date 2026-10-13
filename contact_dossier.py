@@ -29,6 +29,7 @@ decision is made.
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from abc import ABC, abstractmethod
@@ -1283,6 +1284,10 @@ def attribute_findings(evidence: Evidence, company: CompanyInput, background,
     return {"counts": counts, "items": items}
 
 
+class _SkipOutreach(Exception):
+    """Internal: outreach brief switched off."""
+
+
 def _engagement_status(items, stats: dict, failed: bool) -> str:
     if failed:
         return "failed"
@@ -1316,6 +1321,7 @@ def build_dossier(
     seller: SellerContext | None = None,
     person_search: PersonSearch | None = None,
     search_engine_name: str = "brave",
+    outreach_brief: bool | None = None,
 ) -> ContactDossier:
     """
     Run the Stage 3 pipeline: research once (own-site crawl + multi-query
@@ -1443,8 +1449,17 @@ def build_dossier(
     org: list[OrgInference] = _collect(org_future, "org-inference")
     pool.shutdown(wait=False)
 
+    # The outreach brief is OFF by default: users bring their own sales
+    # approach and scrolled past it (Oct 2026). DOSSIER_OUTREACH_BRIEF=on (or
+    # outreach_brief=True) brings it back; the dashboard would also need its
+    # section restored.
+    if outreach_brief is None:
+        outreach_brief = os.environ.get("DOSSIER_OUTREACH_BRIEF", "off").strip().lower() in (
+            "1", "on", "true", "yes")
     outreach: OutreachBrief | None = None
     try:
+        if not outreach_brief:
+            raise _SkipOutreach
         findings = {
             "company": {"name": company.canonical_name, "type": company.places_type,
                         "city": company.city, "state": company.state,
@@ -1462,6 +1477,8 @@ def build_dossier(
             findings["team_photos"] = [
                 {k: v for k, v in ph.items() if k != "summary"} for ph in photos]
         outreach = run_outreach(contact, company, llm, findings, seller=seller)
+    except _SkipOutreach:
+        pass
     except Exception as ex:
         warnings.append(f"outreach synthesis failed: {ex}")
 

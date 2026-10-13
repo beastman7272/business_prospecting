@@ -384,11 +384,6 @@ th { font-weight: 600; font-size: 13px; color: #475569; }
 .eng-rel { font-size: 11px; color: #64748b; font-style: italic; }
 .prov-link { font-size: 11px; margin-left: 4px; }
 
-.outreach-brief { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px 10px; }
-.outreach-brief .angle-opener { color: #1e293b; margin: 2px 0; font-style: italic; }
-.brief-meta { font-size: 12px; color: #334155; margin-top: 8px; display: flex; flex-direction: column; gap: 2px; }
-.brief-sub { margin-top: 8px; }
-.brief-sub h6 { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; color: #64748b; margin-bottom: 2px; }
 .id-badge { padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600; background: #ffedd5; color: #c2410c; }
 .id-possible { background: #fee2e2; color: #b91c1c; }
 .research-log { font-size: 11px; color: #94a3b8; margin-top: 10px; cursor: help; }
