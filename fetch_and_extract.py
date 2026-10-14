@@ -136,6 +136,9 @@ class FetchResult:
     # Counts of content images by kind (real / placeholder / no source), for
     # signals like "staff page with no photos". See audit_images().
     image_audit: dict = field(default_factory=dict)
+    # Visible text of header/nav/footer, which `text` strips (capped). Small
+    # sites put "Family owned since 1998" or "We accept Zelle" there.
+    chrome_text: str = ""
     fetched_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -394,6 +397,20 @@ def audit_images(html: str) -> dict:
         return {}
 
 
+def extract_chrome_text(html: str, max_chars: int = 2500) -> str:
+    """Visible text of the page's header, nav and footer -- the parts
+    extract_main_text() drops. Never raises; "" on failure."""
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, "html.parser")
+        for tag in soup(["script", "style", "noscript", "template", "svg"]):
+            tag.decompose()
+        parts = [t.get_text(" ", strip=True) for t in soup.find_all(["header", "nav", "footer"])]
+        return _collapse_whitespace(" | ".join(p for p in parts if p))[:max_chars]
+    except Exception:
+        return ""
+
+
 def extract_main_text(html: str) -> tuple[str | None, str]:
     """
     Turn raw HTML into (title, clean_text). Uses BeautifulSoup if available,
@@ -571,6 +588,7 @@ class PageFetcher:
         result.links = extract_links(html, result.final_url or url)
         result.contacts = extract_contacts(html)
         result.image_audit = audit_images(html)
+        result.chrome_text = extract_chrome_text(html)
         result.ok = True
         return result
 

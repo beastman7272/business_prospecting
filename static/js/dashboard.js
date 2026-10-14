@@ -816,10 +816,36 @@ function renderDossier(contactId, d) {
           <span class="reach-note">Counted from the page's code; open the page to confirm.</span></li>`).join("")}</ul></div>`
     : "";
 
+  const fin = (log.site_signals || {}).finance_signals;
+  const KIND = { p2p: "person-to-person app", manual: "cash/check", pos: "point-of-sale/booking", software: "accounting/invoicing software" };
+  let finHtml = "";
+  if (fin && fin.none_found) {
+    const checked = [];
+    if (fin.pages_checked) checked.push(`${fin.pages_checked} page${fin.pages_checked === 1 ? "" : "s"} of the company site${fin.careers_pages_checked ? ` (including ${fin.careers_pages_checked} careers page${fin.careers_pages_checked === 1 ? "" : "s"})` : ""}`);
+    if (fin.job_search_ok) checked.push("a job-listing search");
+    const msg = checked.length
+      ? `Checked ${checked.join(" and ")}: no finance-role hiring, growth news, start year or payment tools found.${!fin.pages_checked ? " The company site couldn't be read." : ""}${!fin.job_search_ok ? " The job-listing search failed." : ""}`
+      : "Couldn't check: the company site couldn't be read and the job-listing search failed.";
+    finHtml = `<div class="dossier-block"><h5>Accounting-need signals</h5><p class="empty-msg">${msg}</p></div>`;
+  } else if (fin) {
+    const items = [];
+    (fin.hiring || []).forEach(h => items.push(`<li><strong>Hiring:</strong> ${escapeHtml(h.role)}${h.source === "search" ? " (job listing)" : ""} ${provLink(h.url)}<span class="reach-note">${escapeHtml(h.snippet || "")}</span></li>`));
+    (fin.expansion || []).forEach(e => items.push(`<li><strong>Growth/change:</strong> ${escapeHtml(e.phrase)} ${provLink(e.url)}<span class="reach-note">${escapeHtml(e.snippet || "")}</span></li>`));
+    if (fin.start) {
+      const s = fin.start;
+      items.push(`<li><strong>In business:</strong> ${s.year ? `since ${s.year} (~${s.years_in_business} yr${s.years_in_business === 1 ? "" : "s"})` : `${s.years_in_business} years (as stated)`}${s.young ? " · young business" : ""} ${provLink(s.url)}<span class="reach-note">${escapeHtml(s.snippet || "")}</span></li>`);
+    }
+    if ((fin.payments || []).length) {
+      items.push(`<li><strong>Payment/money tools shown:</strong> ${fin.payments.map(p => `${escapeHtml(p.tool)} (${KIND[p.kind] || p.kind}) ${provLink(p.url)}`).join(", ")}</li>`);
+    }
+    finHtml = `<div class="dossier-block"><h5>Accounting-need signals</h5><ul class="dossier-list">${items.join("")}</ul><p class="reach-note">Pattern matches on the company's own pages and job listings; open the source to confirm.</p></div>`;
+  }
+
   panel.innerHTML = `
     <div class="dossier">
       ${gateHtml}
       ${photoHtml}
+      ${finHtml}
       ${section("Reach", reachHtml, "No reach info found.")}
       ${section("Background", bgHtml, "No background facts.")}
       ${section("Rapport (self-published)", rapportHtml, "No self-published personal details found.")}

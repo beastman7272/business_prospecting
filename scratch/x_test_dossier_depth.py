@@ -70,7 +70,7 @@ class FixtureSearch(SearchProvider):
 
     def search(self, query, max_results=5):
         self.queries.append(query)
-        purpose = next(p for p, q in build_research_queries(CONTACT, COMPANY, 9) if q == query)
+        purpose = next((p for p, q in build_research_queries(CONTACT, COMPANY, 9) if q == query), None)
         return [SearchResult(t, u, sn, query) for t, u, sn in RESULTS.get(purpose, [])][:max_results]
 
 
@@ -422,7 +422,8 @@ def main():
                        engagement_researcher=MockEngagementResearcher(), seller=acct,
                        min_seniority=0)
     check("other profiles don't get the photo check",
-          acct.site_signals == [] and "site_signals" not in d3.research_log
+          acct.site_signals == ["finance_signals"]
+          and "team_photos" not in d3.research_log.get("site_signals", {})
           and not any("Team-page photo check" in doc.text for doc in llm3.seen["background"]))
     os.environ["SEARCHER"] = "photographer"
 
@@ -480,6 +481,109 @@ def main():
     FakeFR.title = "Services"
     check("ordinary pages with real images are not reported",
           team_photo_check(FakeFR(), "https://x.com/services.php") is None)
+
+    print("\nAccountant: finance signals on a young salon's site")
+    import finance_signals as fs
+    from fetch_and_extract import extract_chrome_text
+    S = "https://glowstudio.example.com/"
+    html = ("<html><body><header>Glow Studio</header><main>Hi, I'm Dana.</main>"
+            "<footer>Proudly serving Suwanee since 2023 · We accept Zelle</footer></body></html>")
+    check("header/footer text captured for signals",
+          "since 2023" in extract_chrome_text(html) and "Zelle" in extract_chrome_text(html))
+    salon_pages = {
+        S: ("Glow Studio", "Hi, I'm Dana Park, founder of Glow Studio. Grand opening of our "
+            "second location in Buford this spring!",
+            [{"href": S + "about", "text": "About Dana"},
+             {"href": S + "careers", "text": "Careers"},
+             {"href": "https://glowstudio.square.site/", "text": "Book & pay online"},
+             {"href": S + "financing", "text": "Apply for financing"}],
+            extract_chrome_text(html)),
+        S + "about": ("About", "Dana Park opened Glow Studio after ten years as an esthetician. "
+                      "Meet Jess, our office manager. Join our team!", [], ""),
+        S + "careers": ("Careers", "Join us! Open roles: front desk coordinator; part-time "
+                        "bookkeeper (QuickBooks), 15 hrs/week.", [], ""),
+    }
+
+    class SalonFetcher:
+        def __init__(self):
+            self.log = []
+
+        def fetch(self, url):
+            self.log.append(url)
+            if url not in salon_pages:
+                return FetchResult(url=url, ok=False, error="http_404")
+            t, txt, links, chrome = salon_pages[url]
+            return FetchResult(url=url, ok=True, final_url=url, status_code=200, title=t,
+                               text=txt, links=links, chrome_text=chrome)
+
+    class JobSearch(SearchProvider):
+        def __init__(self):
+            self.queries = []
+
+        def search(self, query, max_results=5):
+            self.queries.append(query)
+            if "jobs OR hiring" in query:
+                return [SearchResult("Payroll Specialist - Glow Studio - Suwanee, GA | Indeed",
+                                     "https://www.indeed.com/viewjob?jk=1", "Glow Studio is hiring a payroll specialist.", query),
+                        SearchResult("Bookkeeper - Other Salon | Indeed",
+                                     "https://www.indeed.com/viewjob?jk=2", "Other Salon is hiring a bookkeeper.", query)]
+            return []
+
+    salon = CompanyInput(canonical_name="Glow Studio", input_name="Glow Studio", city="Suwanee",
+                         state="GA", places_type="beauty_salon", website=S,
+                         domain="glowstudio.example.com")
+    dana = ContactCandidate(name="Dana Park", title="Founder", company="Glow Studio",
+                            evidence=[{"url": S}])
+    os.environ["SEARCHER"] = "accountant"
+    acct_salon = seller_context_for(salon)
+    sf, js = SalonFetcher(), JobSearch()
+    llm5 = MockDossierLLM(signals=PersonSignals(present_urls=[S]))
+    d5 = build_dossier(dana, salon, search=js, fetcher=sf, llm=llm5,
+                       engagement_researcher=MockEngagementResearcher(), seller=acct_salon,
+                       min_seniority=0)
+    fin = d5.research_log.get("site_signals", {}).get("finance_signals") or {}
+    roles = {h["role"]: h for h in fin.get("hiring", [])}
+    check("careers page followed (not the financing link)",
+          S + "careers" in sf.log and S + "financing" not in sf.log, str(sf.log))
+    check("bookkeeper posting found on the careers page",
+          "bookkeeper" in roles and roles["bookkeeper"]["source"] == "own_site", str(fin.get("hiring")))
+    check("'Meet Jess, our office manager' is not read as a job posting",
+          "office manager" not in roles)
+    check("job-board hit kept only for this business",
+          "payroll specialist" in roles and roles["payroll specialist"]["source"] == "search"
+          and all("jk=2" not in (h.get("url") or "") for h in fin.get("hiring", [])))
+    check("expansion, start year and payment tools found",
+          any(e["phrase"].lower() == "second location" for e in fin.get("expansion", []))
+          and (fin.get("start") or {}).get("year") == 2023 and (fin.get("start") or {}).get("young")
+          and {"Zelle", "Square", "QuickBooks"} <= {p["tool"] for p in fin.get("payments", [])},
+          json.dumps(fin)[:600])
+    check("signals reach the evidence but careers pages are not evidence docs",
+          any("Accounting-need signals" in doc.text for doc in llm5.seen["background"])
+          and not any(doc.url == S + "careers" for doc in llm5.seen["background"]))
+    check("hiring search logged, results kept out of the person evidence",
+          any(q["purpose"] == "hiring_signal" for q in d5.research_log["queries"])
+          and not any("indeed.com" in r["url"] for r in d5.research_log["results"]))
+
+    os.environ["SEARCHER"] = "photographer"
+    photog_salon = seller_context_for(salon)
+    js2 = JobSearch()
+    d6 = build_dossier(dana, salon, search=js2, fetcher=SalonFetcher(), llm=MockDossierLLM(
+                           signals=PersonSignals(present_urls=[S])),
+                       engagement_researcher=MockEngagementResearcher(), seller=photog_salon,
+                       min_seniority=0)
+    check("photographer never runs the finance checks or the job search",
+          "finance_signals" not in d6.research_log.get("site_signals", {})
+          and not any("jobs OR hiring" in q for q in js2.queries))
+
+    class EmptyFR:
+        title = "Home"
+        final_url = None
+        text = "Welcome to our office."
+        chrome_text = ""
+        links = []
+    check("a page with nothing to report returns None",
+          fs.finance_signal_check(EmptyFR(), "https://x.com/") is None)
+    check("merge with nothing found returns None", fs.merge_signals([], []) is None)
 
     ok = all(checks)
     print(f"\n{sum(checks)}/{len(checks)} checks passed")

@@ -52,6 +52,7 @@ from contact_discovery import (
     score_people_link,
 )
 from fetch_and_extract import PageFetcher, is_placeholder_email
+import finance_signals
 from active_profile import get_active_profile
 from searcher_profiles.base import effective_play
 from roles import search_terms
@@ -848,6 +849,11 @@ def crawl_own_site(
             if photo:
                 entry["team_photos"] = photo
                 text += "\n" + photo["summary"]
+        if finance_signals.SIGNAL in (signals or []):
+            fin = finance_signals.finance_signal_check(fr, url)
+            if fin:
+                entry[finance_signals.SIGNAL] = fin
+                text += "\n" + fin["summary"]
         docs.append(Doc(fr.final_url or url, text,
                         fr.fetched_at, "own_domain_page", "own_site"))
 
@@ -881,7 +887,37 @@ def crawl_own_site(
             if len(docs) >= max_pages:
                 break
             visit(u)
+
+    if finance_signals.SIGNAL in (signals or []):
+        _visit_careers_pages(links, dom, get_page, seen, log)
     return docs, log
+
+
+def _visit_careers_pages(links: list[dict], dom: str, get_page, seen: set[str],
+                         log: list[dict], max_pages: int = 2) -> None:
+    """Accountant signal: follow up to two links that look like the business's
+    job postings (own site or an applicant-tracking host) and check them for
+    finance roles. Logged only -- a careers page says nothing about the person,
+    so it is not added to the dossier's evidence documents."""
+    picks: dict[str, tuple[int, str]] = {}
+    for link in links:
+        href = link.get("href") or ""
+        k = _norm_url(href)
+        if not k or k in seen:
+            continue
+        s = finance_signals.score_careers_link(link, dom)
+        if s > 0 and (k not in picks or picks[k][0] < s):
+            picks[k] = (s, href)
+    for _, href in sorted(picks.values(), key=lambda t: -t[0])[:max_pages]:
+        seen.add(_norm_url(href))
+        fr = get_page(href.split("#", 1)[0])
+        entry = {"url": href, "ok": bool(fr.ok and fr.text), "careers_page": True,
+                 "reason": fr.skipped_reason or fr.error or ""}
+        log.append(entry)
+        if fr.ok and fr.text:
+            fin = finance_signals.finance_signal_check(fr, href, careers_page=True)
+            if fin:
+                entry[finance_signals.SIGNAL] = fin
 
 
 class PersonSearch(ABC):
@@ -923,6 +959,10 @@ class Evidence:
     crawl_log: list[dict]
     warnings: list[str]
     engines: dict[str, list[str]] = field(default_factory=dict)  # norm url -> engines that found it
+    # Profile site-signal hits from searches (e.g. job listings naming the
+    # business and a finance role). Kept OUT of `results`: they are about the
+    # company, not the person.
+    signal_hits: dict[str, list[dict]] = field(default_factory=dict)
 
 
 def collect_evidence(
@@ -1011,6 +1051,24 @@ def collect_evidence(
                           "results": len(batch), "new": new, "error": err})
         ps_pool.shutdown(wait=False)
 
+    signal_hits: dict[str, list[dict]] = {}
+    if (search is not None and seller is not None
+            and finance_signals.SIGNAL in (seller.site_signals or [])):
+        co = company.canonical_name.replace("\u2019", "'").replace("\u2018", "'")
+        q = f'"{co}" {company.city or ""} jobs OR hiring OR careers'.replace("  ", " ")
+        err = None
+        try:
+            batch = search.search(q, max_results=results_per_query)
+        except Exception as ex:
+            batch, err = [], str(ex)
+            warnings.append(f"search failed (hiring_signal): {ex}")
+        hits = finance_signals.search_hiring_hits(batch, co_words[0] if co_words else "")
+        if hits:
+            signal_hits["hiring"] = hits
+        query_log.append({"engine": search_engine_name, "purpose": "hiring_signal",
+                          "query": q, "results": len(batch), "new": 0,
+                          "signal_hits": len(hits), "error": err})
+
     first, last = parse_name(contact.name)
     snippet_docs: list[Doc] = []
     linkedin_ref: dict | None = None
@@ -1024,7 +1082,7 @@ def collect_evidence(
             linkedin_ref = {"url": r.url, "snippet": r.snippet}
 
     return Evidence(own_docs, snippet_docs, results, purposes, linkedin_ref,
-                    query_log, crawl_log, warnings, engines)
+                    query_log, crawl_log, warnings, engines, signal_hits)
 
 
 def seller_context_for(company: CompanyInput) -> SellerContext | None:
@@ -1342,6 +1400,7 @@ def build_dossier(
             if hasattr(fr, "to_dict"):
                 d = fr.to_dict()
                 d.pop("links", None)          # navigation only; keep raw_json lean
+                d.pop("chrome_text", None)    # header/footer text; signals only
                 out.append(d)
         return out
 
@@ -1374,6 +1433,23 @@ def build_dossier(
     if photos:
         research_log["site_signals"] = {"team_photos": [
             {k: v for k, v in ph.items() if k != "summary"} for ph in photos]}
+    fin_signals = None
+    if seller is not None and finance_signals.SIGNAL in (seller.site_signals or []):
+        fin_signals = finance_signals.merge_signals(
+            [p[finance_signals.SIGNAL] for p in evidence.crawl_log
+             if p.get(finance_signals.SIGNAL)],
+            evidence.signal_hits.get("hiring"))
+        # Recorded even when empty, so "looked, found nothing" can be told
+        # apart from "couldn't look" (site unreadable, job search failed).
+        job_q = [q for q in evidence.query_log if q.get("purpose") == "hiring_signal"]
+        research_log.setdefault("site_signals", {})[finance_signals.SIGNAL] = (
+            fin_signals or {
+                "none_found": True,
+                "pages_checked": sum(1 for p in evidence.crawl_log if p.get("ok")),
+                "careers_pages_checked": sum(1 for p in evidence.crawl_log
+                                             if p.get("careers_page") and p.get("ok")),
+                "job_search_ok": bool(job_q) and not job_q[0].get("error"),
+            })
     if not evidence.own_docs:
         warnings.append("could not read any page on the company's own website")
 
@@ -1476,6 +1552,8 @@ def build_dossier(
         if photos:
             findings["team_photos"] = [
                 {k: v for k, v in ph.items() if k != "summary"} for ph in photos]
+        if fin_signals:
+            findings["finance_signals"] = fin_signals
         outreach = run_outreach(contact, company, llm, findings, seller=seller)
     except _SkipOutreach:
         pass

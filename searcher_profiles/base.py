@@ -54,6 +54,11 @@ class SearcherProfile:
     #   "team_photos" -- count real vs placeholder/missing photos on the
     #                    prospect's team/staff pages (a headshot photographer's
     #                    best "why now").
+    #   "finance_signals" -- an accounting/bookkeeping seller's checks (see
+    #                    finance_signals.py): finance-role job postings on the
+    #                    site, its careers page or job boards; a new location,
+    #                    move or new ownership; the year the business started;
+    #                    and the payment/accounting tools the site shows.
     site_signals: list[str] = field(default_factory=list)
 
 

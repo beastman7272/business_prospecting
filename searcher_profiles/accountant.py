@@ -15,6 +15,16 @@ Review note from generation: the hospitality_hotel play carries `controller`
 as a probe_role because that inventory (GC-shaped) doesn't list finance roles a
 hotel actually has. If this probe keeps recurring across profiles, promote
 `controller` into hospitality_hotel's inventory in target_segments.py.
+
+October 2026 review: this profile is a composite of the accountants and
+bookkeepers the user has spoken with, not one firm; split it if those sellers
+start to differentiate (tax-only, payroll, fractional CFO, industry niches).
+The description now names the kinds of businesses the plays cover (it said
+only "local businesses"); it is the seller context every dossier and Enrich
+prompt sees. Added the "finance_signals" site checks -- this seller's
+equivalent of the photographer's team-photo check (finance_signals.py) -- and
+a site: search for the staff/about pages where office managers and
+bookkeepers are named. Segment coverage reviewed and left as is.
 """
 
 from searcher_profiles.base import SearcherProfile, SegmentPlay
@@ -22,6 +32,7 @@ from searcher_profiles.base import SearcherProfile, SegmentPlay
 _RATIONALE = ("Outsourced bookkeeping, tax, and controller work; the owner or "
              "finance lead is the buyer.")
 _TACTICS = [
+    'site:{domain} team OR staff OR about OR "office manager" OR bookkeeper',
     '"{company}" "{city}" owner OR "chief financial officer" OR controller',
     '"{company}" linkedin "{city}" bookkeeper OR controller OR "office manager"',
 ]
@@ -39,11 +50,19 @@ ACCOUNTANT_PROFILE = SearcherProfile(
     display_name="Accounting & Bookkeeping Firm",
     description=(
         "A small accounting and bookkeeping firm in metro Atlanta selling "
-        "monthly bookkeeping, tax prep, payroll, and fractional controller/CFO "
-        "services to local businesses. The buyer is whoever owns the money: the "
-        "owner at small shops, the finance lead (CFO/controller/bookkeeper) at "
-        "larger ones."
+        "monthly bookkeeping, catch-up/cleanup bookkeeping, tax prep, payroll, "
+        "and fractional controller/CFO services to owner-run local businesses: "
+        "professional and medical practices, salons, studios and gyms, "
+        "childcare, trade contractors and home-service companies, auto "
+        "dealers and repair shops, small manufacturers, hotels, venues, "
+        "property and self-storage owners, and churches and nonprofits. The "
+        "buyer is whoever owns the money: the owner at small shops, the "
+        "finance lead (CFO/controller/bookkeeper/office manager) at larger "
+        "ones."
     ),
+    # Finance-role job postings, a new location or owner, a young business,
+    # and informal payment tools are this seller's clearest "why now".
+    site_signals=["finance_signals"],
     plays={
         "professional_services_office": _p("professional_services_office",
             ["owner", "managing_partner", "cfo", "controller", "bookkeeper", "office_manager", "administrator"]),

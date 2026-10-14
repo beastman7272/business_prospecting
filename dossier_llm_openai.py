@@ -552,6 +552,17 @@ Task: write a short cold-outreach brief for the seller above.
   team, photos taken at different times (see photo_years when present), or
   keeping new hires matching -- and say the look of the photos should be
   checked by eye.
+- If the findings include "finance_signals" (an accounting seller's site
+  checks: hiring for bookkeeping/office/payroll roles, a new location, move or
+  new ownership, the year the business started, and the payment or
+  accounting tools its site shows), treat each item as checkable evidence and
+  cite its URL. A finance-role job posting is the strongest timing reason
+  (they are trying to hire work the seller does); a young business or new
+  location is a natural "set up the books right" moment; person-to-person
+  apps or "cash/check only" suggest informal bookkeeping, a point-of-sale or
+  booking platform means sales that need reconciling, and named accounting
+  software is a software-specific angle. Phrase these as observations, never
+  as claims about the state of their books.
 - why_now: a concrete timing reason if the findings support one (new
   business, recent move, recent post, growth), else null. Do not invent one.
 - avoid: things that would land badly (e.g. leading with a detail only seen
