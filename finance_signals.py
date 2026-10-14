@@ -62,9 +62,11 @@ FOUNDED_RE = re.compile(
     r"in business since|family[- ]owned since|serving [^.]{0,60}? since)\s*(?:in\s+)?"
     r"((?:18|19|20)\d{2})\b", re.I)
 
+# Only claims about the BUSINESS. "26 years of experience" on a team page is
+# about a staff member (Duluth Chiropractic's physical therapist), not the firm.
 YEARS_CLAIM_RE = re.compile(
-    r"\b(?:over|more than|nearly|almost)?\s*(\d{1,3})\+?\s+years\s+(?:of\s+)?"
-    r"(?:in business|serving|of service|experience)", re.I)
+    r"\b(?:over|more than|nearly|almost)?\s*(\d{1,3})\+?\s+years\s+"
+    r"(?:in business|of business|serving (?:the|our)|of serving|in (?:the|our) community)", re.I)
 
 # Payment / money tools: name -> (kind, url fragments, text phrases).
 # kind: p2p (person-to-person apps), manual (cash/check), pos (point-of-sale /
@@ -155,12 +157,15 @@ def find_hiring(text: str, careers_page: bool = False) -> list[dict]:
 
 
 def find_expansion(text: str) -> list[dict]:
-    out, seen = [], set()
+    """Growth/change phrases. Several phrases in one announcement ("Grand
+    Opening ... is expanding to include ...") are reported once."""
+    out, seen, kept_at = [], set(), []
     for m in EXPANSION_RE.finditer(text or ""):
         key = m.group(1).lower()
-        if key in seen:
+        if key in seen or any(abs(m.start() - k) < 200 for k in kept_at):
             continue
         seen.add(key)
+        kept_at.append(m.start())
         out.append({"phrase": m.group(1), "snippet": _snippet(text, m.start(), m.end())})
         if len(out) >= 4:
             break
@@ -184,13 +189,19 @@ def find_founded(text: str, this_year: int | None = None) -> list[dict]:
     return out[:4]
 
 
-def find_payments(text: str, links: list[dict] | None) -> list[dict]:
+def find_payments(text: str, links: list[dict] | None, page_url: str = "") -> list[dict]:
+    from urllib.parse import urlparse
     low = (text or "").lower()
     hrefs = [((l.get("href") or "").lower(), l.get("href") or "") for l in (links or [])]
+    page_host = (urlparse(page_url).netloc or "").lower()
     out = []
     for name, (kind, url_bits, phrases) in PAYMENT_TOOLS.items():
         where = None
-        for low_h, h in hrefs:
+        if page_host and any(b in page_host for b in url_bits):
+            # e.g. jrskinstudio.glossgenius.com -- the business's whole site
+            # (booking and checkout) runs on the platform.
+            where = f"the business's own website is hosted on {name} ({page_host})"
+        for low_h, h in ([] if where else hrefs):
             if any(b in low_h for b in url_bits):
                 where = f"link: {h[:120]}"
                 break
@@ -243,7 +254,7 @@ def finance_signal_check(fr, url: str, careers_page: bool = False,
         "hiring": find_hiring(text, careers_page=careers_page),
         "expansion": find_expansion(text),
         "founded": find_founded(full, this_year),
-        "payments": find_payments(full, getattr(fr, "links", None)),
+        "payments": find_payments(full, getattr(fr, "links", None), fr.final_url or url),
     }
     if not any(found.values()):
         return None

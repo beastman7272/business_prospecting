@@ -553,7 +553,7 @@ def main():
           "payroll specialist" in roles and roles["payroll specialist"]["source"] == "search"
           and all("jk=2" not in (h.get("url") or "") for h in fin.get("hiring", [])))
     check("expansion, start year and payment tools found",
-          any(e["phrase"].lower() == "second location" for e in fin.get("expansion", []))
+          any("second location" in e["snippet"] for e in fin.get("expansion", []))
           and (fin.get("start") or {}).get("year") == 2023 and (fin.get("start") or {}).get("young")
           and {"Zelle", "Square", "QuickBooks"} <= {p["tool"] for p in fin.get("payments", [])},
           json.dumps(fin)[:600])
@@ -581,6 +581,20 @@ def main():
         text = "Welcome to our office."
         chrome_text = ""
         links = []
+    check("'26 years of experience' (a staff bio) is not the business's age",
+          fs.find_founded("With more than 26 years of experience in physical therapy", 2026) == [])
+    check("one announcement with several growth words is reported once",
+          len(fs.find_expansion("Grand Opening Friday! We are expanding to include a new clinic.")) == 1)
+    check("a site hosted on a booking platform is reported as such",
+          "hosted on GlossGenius" in fs.find_payments("", [], "https://x.glossgenius.com/about")[0]["where"])
+    from contact_dossier import _seniority_score
+    from roles import search_terms
+    from searcher_profiles.base import effective_play
+    from searcher_profiles import get_profile
+    titles = [t for rr in effective_play(get_profile("accountant"), "auto_dealership").roles
+              for t in search_terms(rr.role.key)]
+    check("a dealership Controller clears the accountant's seniority bar",
+          _seniority_score("Controller", titles) >= 1)
     check("a page with nothing to report returns None",
           fs.finance_signal_check(EmptyFR(), "https://x.com/") is None)
     check("merge with nothing found returns None", fs.merge_signals([], []) is None)

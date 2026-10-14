@@ -471,5 +471,28 @@ for _sid, _new_roles in _PROCUREMENT_ADDITIONS.items():
             _inv.append(_rk)
 
 
+_FINANCE_ADDITIONS: dict[str, list[str]] = {
+    # The people who keep the books at these businesses. The GC-era
+    # inventories left them out, so a dealership Controller (Gwinnett Place
+    # Nissan) scored seniority 0 for the accountant profile and the dossier
+    # short-circuited. Only roles these businesses commonly have.
+    "auto_dealership": ["controller", "office_manager"],
+    "auto_service": ["office_manager", "bookkeeper"],
+    "manufacturing_industrial": ["office_manager", "bookkeeper"],
+    "childcare_camp": ["office_manager"],
+    "campground_rv": ["office_manager", "bookkeeper"],
+    "commercial_property": ["controller", "bookkeeper"],
+    "entertainment_venue": ["controller", "bookkeeper"],
+    "hospitality_hotel": ["bookkeeper"],
+    "religious_nonprofit": ["office_manager"],
+    "fitness_recreation": ["office_manager"],
+}
+for _sid, _new_roles in _FINANCE_ADDITIONS.items():
+    _inv = SEGMENTS[_sid].role_inventory
+    for _rk in _new_roles:
+        if _rk not in _inv:
+            _inv.append(_rk)
+
+
 def get_segment(segment_id: str) -> TargetSegment | None:
     return SEGMENTS.get(segment_id)

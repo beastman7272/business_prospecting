@@ -24,7 +24,11 @@ only "local businesses"); it is the seller context every dossier and Enrich
 prompt sees. Added the "finance_signals" site checks -- this seller's
 equivalent of the photographer's team-photo check (finance_signals.py) -- and
 a site: search for the staff/about pages where office managers and
-bookkeepers are named. Segment coverage reviewed and left as is.
+bookkeepers are named. Segment coverage reviewed and left as is, but the
+finance roles were missing from many plays because the shared inventories
+lacked them (a dealership Controller scored 0 and was skipped): controller,
+bookkeeper and office_manager were added to those inventories
+(_FINANCE_ADDITIONS in target_segments.py) and ranked here.
 """
 
 from searcher_profiles.base import SearcherProfile, SegmentPlay
@@ -67,7 +71,7 @@ ACCOUNTANT_PROFILE = SearcherProfile(
         "professional_services_office": _p("professional_services_office",
             ["owner", "managing_partner", "cfo", "controller", "bookkeeper", "office_manager", "administrator"]),
         "manufacturing_industrial": _p("manufacturing_industrial",
-            ["cfo", "controller", "owner", "general_manager", "coo"]),
+            ["cfo", "controller", "owner", "general_manager", "office_manager", "bookkeeper", "coo"]),
         "trade_services_small_business": _p("trade_services_small_business",
             ["owner", "founder", "bookkeeper", "office_manager", "general_manager"]),
         "wellness_studio": _p("wellness_studio",
@@ -77,27 +81,27 @@ ACCOUNTANT_PROFILE = SearcherProfile(
         "healthcare_practice": _p("healthcare_practice",
             ["owner", "practice_manager", "office_manager", "bookkeeper", "managing_physician"]),
         "childcare_camp": _p("childcare_camp",
-            ["owner", "franchisee", "bookkeeper", "center_director"]),
+            ["owner", "franchisee", "bookkeeper", "office_manager", "center_director"]),
         "campground_rv": _p("campground_rv",
-            ["owner", "general_manager", "property_manager"]),
+            ["owner", "bookkeeper", "office_manager", "general_manager", "property_manager"]),
         "commercial_property": _p("commercial_property",
-            ["owner", "asset_manager", "property_manager"]),
+            ["owner", "controller", "bookkeeper", "asset_manager", "property_manager"]),
         "religious_nonprofit": _p("religious_nonprofit",
-            ["administrator", "bookkeeper", "executive_director", "executive_pastor"]),
+            ["administrator", "bookkeeper", "office_manager", "executive_director", "executive_pastor"]),
         "auto_dealership": _p("auto_dealership",
-            ["cfo", "owner", "dealer_principal", "general_manager"]),
+            ["cfo", "controller", "owner", "dealer_principal", "general_manager", "office_manager"]),
         "auto_service": _p("auto_service",
-            ["owner", "franchisee", "general_manager", "regional_manager"]),
+            ["owner", "office_manager", "bookkeeper", "franchisee", "general_manager", "regional_manager"]),
         "fitness_recreation": _p("fitness_recreation",
-            ["owner", "franchisee", "general_manager"]),
+            ["owner", "franchisee", "general_manager", "office_manager"]),
         "entertainment_venue": _p("entertainment_venue",
-            ["owner", "general_manager", "executive_director", "venue_manager"]),
+            ["owner", "controller", "general_manager", "executive_director", "venue_manager", "bookkeeper"]),
         "self_storage": _p("self_storage",
             ["owner", "regional_manager"]),
         "trade_contractor": _p("trade_contractor",
             ["owner", "bookkeeper", "controller", "office_manager", "general_manager"]),
         "hospitality_hotel": _p("hospitality_hotel",
-            ["owner", "controller", "franchisee", "general_manager", "asset_manager"]),
+            ["owner", "controller", "franchisee", "general_manager", "bookkeeper", "asset_manager"]),
     },
 )
 

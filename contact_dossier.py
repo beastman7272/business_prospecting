@@ -1067,7 +1067,9 @@ def collect_evidence(
             signal_hits["hiring"] = hits
         query_log.append({"engine": search_engine_name, "purpose": "hiring_signal",
                           "query": q, "results": len(batch), "new": 0,
-                          "signal_hits": len(hits), "error": err})
+                          "signal_hits": len(hits), "error": err,
+                          # what the job search returned, to audit misses
+                          "seen": [{"title": r.title, "url": r.url} for r in batch[:8]]})
 
     first, last = parse_name(contact.name)
     snippet_docs: list[Doc] = []

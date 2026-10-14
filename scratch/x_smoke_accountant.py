@@ -91,6 +91,9 @@ def show(d):
     for q in d.research_log.get("queries", []):
         print(f"  {q.get('engine', 'brave'):10} {q['purpose']:14} {q['results']:2} results  {q['query']}"
               + (f"  ERROR {q['error']}" if q.get("error") else ""))
+        if q["purpose"] == "hiring_signal" and not q.get("signal_hits"):
+            for r in q.get("seen") or []:
+                print(f"      (job search, not a finance-role hit) {r['title'][:70]}  {r['url']}")
     print("--- OWN SITE ---")
     for p in d.research_log.get("own_site_pages", []):
         tag = "careers" if p.get("careers_page") else "page"
