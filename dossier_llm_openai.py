@@ -17,6 +17,7 @@ call is isolated in ``_complete`` so parsing/mapping can be tested offline.
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 from typing import Any
@@ -37,7 +38,24 @@ from contact_dossier import (
     ContactCandidate,
     CompanyInput,
     _now,
+    _TOP_ROLE_RE,
 )
+
+
+def social_pass_wanted(contact, setting: str | None = None) -> bool:
+    """Whether to run the second, social-posts web search for this contact.
+    DOSSIER_SOCIAL_SEARCH: "top" (default) = only for owners / founders /
+    CEOs / presidents / managing partners / dealer principals; "all" = every
+    contact (the behaviour before Oct 2026); "off" = never.
+    The social pass was ~40% of a dossier's tokens (65k of 159k input for a
+    law-firm administrator) and finds most for owner-operators who market
+    themselves in community groups (Steven Tison's Facebook posts)."""
+    mode = (setting or os.environ.get("DOSSIER_SOCIAL_SEARCH") or "top").strip().lower()
+    if mode in ("all", "on", "1", "true", "yes"):
+        return True
+    if mode in ("off", "0", "false", "no", "none"):
+        return False
+    return bool(_TOP_ROLE_RE.search(contact.title or ""))
 from contact_discovery import SearchResult
 
 DEFAULT_MODEL = "gpt-6.1-sol"
@@ -753,7 +771,7 @@ class OpenAIWebPersonSearch(_UsageMixin, PersonSearch):
         self._loc = {"type": "approximate", "country": "US",
                      "city": company.city or None, "region": company.state or None}
         prompts = [("general", self._prompt(contact, company, seller))]
-        if self.social_pass:
+        if self.social_pass and social_pass_wanted(contact):
             prompts.append(("social", self._social_prompt(contact, company)))
 
         def run(label, prompt):

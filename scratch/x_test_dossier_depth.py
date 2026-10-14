@@ -681,6 +681,12 @@ def main():
           um.usage_log() == [{"call": "web_search_general", "model": "m", "input_tokens": 900,
                               "output_tokens": 120, "web_searches": 1}])
 
+    from dossier_llm_openai import social_pass_wanted
+    admin = ContactCandidate(name="Tracy Stevens", title="Firm Administrator", company="HLM")
+    check("social web search: owners only by default; 'all' and 'off' settings work",
+          social_pass_wanted(CONTACT, None) and not social_pass_wanted(admin, None)
+          and social_pass_wanted(admin, "all") and not social_pass_wanted(CONTACT, "off"))
+
     ok = all(checks)
     print(f"\n{sum(checks)}/{len(checks)} checks passed")
     return 0 if ok else 1
