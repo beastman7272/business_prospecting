@@ -802,9 +802,13 @@ function renderDossier(contactId, d) {
   const pagesRead = (log.own_site_pages || []).filter(p => p.ok).length;
   const attr = (log.attribution || {}).counts || {};
   const attrText = Object.entries(attr).map(([k, v]) => `${k.replace(/_/g, " ")} ${v}`).join(", ");
+  const usage = log.usage || null;
+  const usageText = usage && (usage.calls || []).length
+    ? ` Model use: ${(usage.calls || []).length} calls, ${Number(usage.input_tokens || 0).toLocaleString()} input + ${Number(usage.output_tokens || 0).toLocaleString()} output tokens${usage.web_searches ? `, ${usage.web_searches} web searches` : ""}.`
+    : "";
   const logHtml = queries.length
     ? `<p class="research-log" title="${escapeHtml(queries.map(q => `${q.engine || "brave"} · ${q.purpose}: ${q.query} (${q.results})`).join("\n"))}">
-         Researched with ${queries.length} search${queries.length === 1 ? "" : "es"} (${log.search_results ?? 0} unique results) and ${pagesRead} page${pagesRead === 1 ? "" : "s"} of the company site${log.seller ? ` · for ${escapeHtml(log.seller)} profile` : ""}.${attrText ? ` Findings came from: ${escapeHtml(attrText)}.` : ""}</p>`
+         Researched with ${queries.length} search${queries.length === 1 ? "" : "es"} (${log.search_results ?? 0} unique results) and ${pagesRead} page${pagesRead === 1 ? "" : "s"} of the company site${log.seller ? ` · for ${escapeHtml(log.seller)} profile` : ""}.${attrText ? ` Findings came from: ${escapeHtml(attrText)}.` : ""}${usageText}</p>`
     : "";
 
   const photoChecks = ((log.site_signals || {}).team_photos || []);

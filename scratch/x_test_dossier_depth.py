@@ -622,6 +622,65 @@ def main():
           fs.finance_signal_check(EmptyFR(), "https://x.com/") is None)
     check("merge with nothing found returns None", fs.merge_signals([], []) is None)
 
+    print("\nTrimmed dossier: caps, no repeats, one-line org for top roles, usage")
+    team = ("Join Today. At Blueprint Smiles, we're always looking for talented people to join "
+            "our team. Whether you're a dentist, hygienist, or dental assistant, you'll find a role "
+            "that offers opportunities for growth and advancement.\n\nLeadership team\n\n"
+            "Dr. Dipesh Patel\n\nChief Executive Officer\n\nChief Financial Officer\n\n(Owner Doctor)")
+    check("a CEO/CFO title on a 'join our team' page is not a CFO opening",
+          fs.find_hiring(team, careers_page=True) == [])
+    check("a real careers listing still counts",
+          [h["role"] for h in fs.find_hiring("We're Hiring Available Positions Dentist Hygienist "
+                                             "Office Manager", careers_page=True)] == ["office manager"])
+    from contact_dossier import trim_sections, top_role_inference, GateVerdict
+    U = "https://x.com/"
+    bg = [BackgroundFact(claim=f"Fact {i}", source_url=U + f"b{i}", date=None, confidence="high") for i in range(9)]
+    bg.append(BackgroundFact(claim="Spoke about collections results", source_url=U + "e1", date=None, confidence="high"))
+    bg.append(BackgroundFact(claim="Earned his DMD in 2012", source_url=U + "e2", date=None, confidence="high"))
+    eng = [EngagementItem(url=U + f"e{i}", kind="article", title=f"E{i}", date=None,
+                          summary="s", identity_confidence="high") for i in range(9)]
+    rap = [RapportHook(detail="Ran the 5K with 35 teammates", kind="community", source_url=U + "e0")]
+    b2, e2, r2 = trim_sections(bg[-2:] + bg[:9], eng, rap)
+    check("engagement capped at 5 and the 5K (also a rapport detail) dropped",
+          len(e2) == 5 and all(e.url != U + "e0" for e in e2), str([e.url for e in e2]))
+    check("background capped at 6; activity fact citing an engagement item dropped, career fact kept",
+          len(b2) == 6 and not any("collections" in f.claim for f in b2)
+          and any("DMD" in f.claim for f in b2), str([f.claim for f in b2]))
+    g = GateVerdict(currency="current", currency_evidence={"present_urls": [U + "team"]},
+                    seniority_score=9, worth_deepdive=True, rationale="")
+    ceo = ContactCandidate(name="Dipesh Patel", title="Chief Executive Officer", company="B")
+    ctl = ContactCandidate(name="Angela Jennings", title="Controller", company="B")
+    org = top_role_inference(ceo, COMPANY, g)
+    check("CEO gets a one-line org note with no model call; a Controller still gets the LLM step",
+          org and len(org) == 1 and org[0].basis == [U + "team"]
+          and top_role_inference(ctl, COMPANY, g) is None)
+
+    class UsageLLM(MockDossierLLM):
+        def usage_log(self):
+            return [{"call": "background", "model": "m", "input_tokens": 1200,
+                     "output_tokens": 300, "web_searches": 0}]
+    os.environ["SEARCHER"] = "photographer"
+    du = build_dossier(CONTACT, COMPANY, search=FixtureSearch(), fetcher=StubFetcher(),
+                       llm=UsageLLM(signals=PersonSignals(present_urls=[HOME])),
+                       engagement_researcher=MockEngagementResearcher(), min_seniority=0)
+    u = du.research_log.get("usage") or {}
+    check("dossier records model usage (only calls made after it started)",
+          u.get("input_tokens") == 0 and "calls" in u, str(u))
+
+    from dossier_llm_openai import _UsageMixin
+
+    class FakeResp:
+        class usage:
+            input_tokens = 900
+            output_tokens = 120
+        output = [type("O", (), {"type": "web_search_call"})(), type("O", (), {"type": "message"})()]
+    um = _UsageMixin()
+    um.model = "m"
+    um._record_usage(FakeResp(), "web_search_general")
+    check("token counts and web searches are read from the API response",
+          um.usage_log() == [{"call": "web_search_general", "model": "m", "input_tokens": 900,
+                              "output_tokens": 120, "web_searches": 1}])
+
     ok = all(checks)
     print(f"\n{sum(checks)}/{len(checks)} checks passed")
     return 0 if ok else 1

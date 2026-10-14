@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from typing import Any
 
 from contact_dossier import (
@@ -135,10 +136,9 @@ ENGAGEMENT_SCHEMA = _obj(
                     "date": _nullable_str(),
                     "summary": {"type": "string"},
                     "identity_confidence": {"type": "string"},
-                    "relevance": {"type": "string"},
                 },
                 ["url", "kind", "title", "date", "summary",
-                 "identity_confidence", "relevance"],
+                 "identity_confidence"],
             ),
         }
     },
@@ -172,9 +172,8 @@ RAPPORT_SCHEMA = _obj(
                     "detail": {"type": "string"},
                     "kind": {"type": "string"},
                     "source_url": {"type": "string"},
-                    "suggested_use": {"type": "string"},
                 },
-                ["detail", "kind", "source_url", "suggested_use"],
+                ["detail", "kind", "source_url"],
             ),
         }
     },
@@ -257,7 +256,34 @@ def _render_docs(documents: list[Doc], per_doc_chars: int) -> str:
 # The implementation
 # -----------------------------------------------------------------------------
 
-class OpenAIDossierLLM(DossierLLM):
+def _usage_entry(resp, call: str, model: str) -> dict:
+    """Token counts for one Responses API call (0 when the SDK omits them),
+    plus how many web searches the model ran."""
+    u = getattr(resp, "usage", None)
+    searches = sum(1 for o in (getattr(resp, "output", None) or [])
+                   if getattr(o, "type", "") == "web_search_call")
+    return {"call": call, "model": model,
+            "input_tokens": int(getattr(u, "input_tokens", 0) or 0),
+            "output_tokens": int(getattr(u, "output_tokens", 0) or 0),
+            "web_searches": searches}
+
+
+class _UsageMixin:
+    """Keeps a per-instance log of every model call's token counts so a
+    dossier can report what it cost (research_log["usage"])."""
+
+    def _record_usage(self, resp, call: str) -> None:
+        if not hasattr(self, "_usage_lock"):
+            self._usage_lock = threading.Lock()
+            self.usage = []
+        with self._usage_lock:
+            self.usage.append(_usage_entry(resp, call, getattr(self, "model", "")))
+
+    def usage_log(self) -> list[dict]:
+        return list(getattr(self, "usage", []) or [])
+
+
+class OpenAIDossierLLM(_UsageMixin, DossierLLM):
     def __init__(
         self,
         client: Any | None = None,
@@ -298,6 +324,7 @@ class OpenAIDossierLLM(DossierLLM):
             raise DossierLLMError(
                 f"OpenAI DossierLLM '{schema_name}' call failed: {ex}"
             ) from ex
+        self._record_usage(resp, schema_name)
         if getattr(resp, "status", None) == "incomplete":
             reason = getattr(getattr(resp, "incomplete_details", None), "reason", "unknown")
             raise DossierLLMError(
@@ -363,8 +390,12 @@ Task: extract background facts about THE PERSON that would help the seller
 open a cold conversation.
 - Focus on the person, not the company brochure: career history and prior
   employers, credentials/licenses, education if role-relevant, how and when
-  they started or joined this business, tenure, professional/community roles,
-  awards, publications.
+  they started or joined this business, tenure, board or association roles.
+- Do NOT include public activity -- posts, talks, panels, podcasts,
+  interviews, articles, case studies, award listings, events. A separate
+  Engagement section lists those; repeating them here doubles the dossier.
+- Return AT MOST 6 facts, the most useful for the seller first. One sentence
+  each.
 - Do NOT restate the company's service list, pricing, or marketing copy. At
   most ONE fact about the business itself, and only if it says something
   about the person's role (e.g. "founded the firm in 2016").
@@ -446,8 +477,13 @@ that show what they're doing. For EVERY item, apply all three checks:
 3) RECENCY: prefer recent items; include a date where supported, else null.
 - An item seen only as a search/social snippet is allowed: say so in the
   summary ("from search snippet; full text not read").
-Give each item a one-line summary and a relevance note saying how the seller
-could use it.
+Skip roster or directory listings (coach lists, advisory-board alumni pages,
+staff directories) unless they show recent activity -- the Background
+section covers roles.
+Return AT MOST 5 items: the most recent and most relevant to the seller's
+offer. If two items cover the same thing, keep one. Give each a ONE-sentence
+summary of what it says; do not add advice on how to use it (the seller
+brings their own approach).
 Return JSON matching the schema.
 """
         data = self._complete("engagement", ENGAGEMENT_SCHEMA, prompt)
@@ -507,9 +543,9 @@ STRICT BOUNDARY -- include a detail only if ALL are true:
 - it is NOT home address, health, religion, politics, finances, or anything
   from people-search, background-check or data-aggregator sites, or news.
 Return [] if nothing qualifies -- that is a normal outcome.
-For each: detail (one sentence), kind (pet | hobby | interest | origin_story |
-community | other), source_url, and suggested_use (one line on how to mention
-it lightly, without sounding like surveillance).
+Return AT MOST 3 hooks. For each: detail (one sentence), kind (pet | hobby |
+interest | origin_story | community | other), and source_url. No advice on
+how to use it.
 Return JSON matching the schema.
 """
         data = self._complete("rapport", RAPPORT_SCHEMA, prompt)
@@ -612,7 +648,7 @@ def _field(obj, name, default=None):
     return getattr(obj, name, default)
 
 
-class OpenAIWebPersonSearch(PersonSearch):
+class OpenAIWebPersonSearch(_UsageMixin, PersonSearch):
     """
     One agentic web search per dossier using OpenAI's hosted ``web_search``
     tool -- the same kind of search that found Steven Tison's Facebook group
@@ -720,12 +756,14 @@ class OpenAIWebPersonSearch(PersonSearch):
         if self.social_pass:
             prompts.append(("social", self._social_prompt(contact, company)))
 
-        def run(prompt):
-            return self._create(model=self.model, input=prompt,
+        def run(label, prompt):
+            resp = self._create(model=self.model, input=prompt,
                                 max_output_tokens=self.max_output_tokens)
+            self._record_usage(resp, f"web_search_{label}")
+            return resp
 
         with ThreadPoolExecutor(max_workers=len(prompts)) as pool:
-            futures = [(label, pool.submit(run, p)) for label, p in prompts]
+            futures = [(label, pool.submit(run, label, p)) for label, p in prompts]
         out: list[SearchResult] = []
         seen: set[str] = set()
         errors: list[str] = []

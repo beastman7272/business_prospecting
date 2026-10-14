@@ -111,7 +111,7 @@ class EngagementItem:
     date: str | None
     summary: str
     identity_confidence: str  # high | medium | low  (is this really the person?)
-    relevance: str            # professional relevance note
+    relevance: str = ""       # legacy: per-item "how to use it" note (no longer requested)
 
 
 @dataclass
@@ -1315,6 +1315,53 @@ def run_rapport(contact, company, docs, llm, seller=None) -> list[RapportHook]:
     return [h for h in hooks if h.source_url and h.detail]
 
 
+# Section caps (Oct 2026, cost and reading time): a 7-practice dental group's
+# CEO came back with 11 background facts, 15 engagement items each carrying
+# a "how to use it" paragraph, and the same 5K run in three sections.
+MAX_BACKGROUND = 6
+MAX_ENGAGEMENT = 5
+MAX_RAPPORT = 3
+
+
+def trim_sections(background, engagement, rapport):
+    """Cap each section and drop repeats across sections: an engagement item
+    already shown as a rapport detail (same URL) is dropped, and a background
+    fact citing an engagement item's URL is dropped unless it is a career or
+    credential fact (those often come from an interview page)."""
+    rapport = rapport[:MAX_RAPPORT]
+    rapport_urls = {_norm_url(h.source_url) for h in rapport if h.source_url}
+    engagement = [e for e in engagement if _norm_url(e.url) not in rapport_urls][:MAX_ENGAGEMENT]
+    eng_urls = {_norm_url(e.url) for e in engagement if e.url}
+    career = re.compile(r"\b(degree|dmd|dds|md|cpa|licen[sc]e|certif|graduat|earned|"
+                        r"attended|worked|employ|joined|founded|started|served|"
+                        r"previously|formerly|board|member|president|owner)\b", re.I)
+    background = [f for f in background
+                  if _norm_url(f.source_url) not in eng_urls or career.search(f.claim)]
+    return background[:MAX_BACKGROUND], engagement, rapport
+
+
+_TOP_ROLE_RE = re.compile(
+    r"\b(owner|co-?owner|founder|co-?founder|ceo|chief executive|president|"
+    r"managing partner|dealer principal|proprietor)\b", re.I)
+
+
+def top_role_inference(contact, company, gate) -> list[OrgInference] | None:
+    """For an owner / founder / CEO / president, the org section is one line
+    and needs no model call. None for anyone else (the LLM step runs)."""
+    title = (contact.title or "").strip()
+    if not _TOP_ROLE_RE.search(title):
+        return None
+    basis = (list((gate.currency_evidence or {}).get("present_urls") or [])[:1]
+             or [e.get("url") for e in contact.evidence if e.get("url")][:1]
+             or [company.website or ""])
+    if not basis[0]:
+        return None
+    return [OrgInference(
+        claim=f"Holds the top role ({title}); likely the final decision-maker "
+              "on outside services, possibly with co-owners.",
+        basis=basis, confidence="medium")]
+
+
 def run_org_inference(contact, company, evidence, llm) -> list[OrgInference]:
     """Low-confidence reporting inference with the citation guard (§5.4): any
     inference lacking a concrete evidence basis is dropped."""
@@ -1426,6 +1473,18 @@ def build_dossier(
     warnings: list[str] = []
     if seller is None:
         seller = seller_context_for(company)
+    # Model-usage bookkeeping: each provider keeps a running log; record
+    # where it stood so this dossier reports only its own calls.
+    usage_sources = [s for s in (llm, person_search) if hasattr(s, "usage_log")]
+    usage_marks = [len(s.usage_log()) for s in usage_sources]
+
+    def _usage() -> dict:
+        calls = [c for s, m in zip(usage_sources, usage_marks) for c in s.usage_log()[m:]]
+        return {"calls": calls,
+                "input_tokens": sum(c["input_tokens"] for c in calls),
+                "output_tokens": sum(c["output_tokens"] for c in calls),
+                "web_searches": sum(c.get("web_searches", 0) for c in calls),
+                "brave_searches": getattr(search, "calls", None)}
 
     evidence = collect_evidence(
         contact, company, search=search, get_page=get_page,
@@ -1479,6 +1538,7 @@ def build_dossier(
 
     if not gate.worth_deepdive:
         warnings.append(f"short-circuited: {gate.rationale}")
+        research_log["usage"] = _usage()
         return ContactDossier(
             contact=contact, company=company, gate=gate,
             research_log=research_log, warnings=warnings,
@@ -1496,8 +1556,10 @@ def build_dossier(
     # the server timeout: org starts now; background + rapport start as soon
     # as engagement has gathered the external evidence they also read.
     pool = ThreadPoolExecutor(max_workers=3)
-    org_future = pool.submit(run_org_inference, contact, company,
-                             evidence.own_docs + evidence.snippet_docs, llm)
+    top = top_role_inference(contact, company, gate)
+    org_future = (None if top else
+                  pool.submit(run_org_inference, contact, company,
+                              evidence.own_docs + evidence.snippet_docs, llm))
 
     engagement: list[EngagementItem] = []
     eng_failed = False
@@ -1541,8 +1603,9 @@ def build_dossier(
 
     background: list[BackgroundFact] = _collect(bg_future, "background")
     rapport: list[RapportHook] = _collect(rapport_future, "rapport")
-    org: list[OrgInference] = _collect(org_future, "org-inference")
+    org: list[OrgInference] = top if top else _collect(org_future, "org-inference")
     pool.shutdown(wait=False)
+    background, engagement, rapport = trim_sections(background, engagement, rapport)
 
     # The outreach brief is OFF by default: users bring their own sales
     # approach and scrolled past it (Oct 2026). DOSSIER_OUTREACH_BRIEF=on (or
@@ -1581,6 +1644,7 @@ def build_dossier(
 
     research_log["attribution"] = attribute_findings(
         evidence, company, background, engagement, rapport, outreach)
+    research_log["usage"] = _usage()
 
     return ContactDossier(
         contact=contact, company=company, gate=gate,

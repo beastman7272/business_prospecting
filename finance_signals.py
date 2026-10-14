@@ -148,16 +148,34 @@ def _canon_role(role: str) -> str:
     return {"chief financial officer": "cfo", "comptroller": "controller"}.get(r, r)
 
 
-def find_hiring(text: str, careers_page: bool = False) -> list[dict]:
-    """Finance-role mentions in a hiring context. On a careers page every
-    finance-role mention counts; elsewhere a hiring word must sit nearby."""
+# On a careers page, a role counts only near job-listing wording. Blueprint
+# Smiles' "Join Our Team" link led to its leadership page, and the CEO's "Chief
+# Financial Officer" title was reported as a CFO opening.
+CAREERS_CONTEXT_RE = re.compile(
+    r"\b(hiring|positions?|openings?|open roles?|job|jobs|apply|application|"
+    r"careers?|vacanc\w*|join us|full[- ]time|part[- ]time|now accepting)\b", re.I)
+_CAREERS_WINDOW = 250
+
+
+def find_hiring(text: str, careers_page: bool = False, listing: bool = False) -> list[dict]:
+    """Finance-role mentions in a hiring context.
+    listing=True (a job-board title/snippet): every finance role counts.
+    careers_page=True: a job-listing word must be within ~250 characters.
+    Otherwise: a hiring phrase must be in the same sentence."""
     out: list[dict] = []
     seen: set[str] = set()
     for m in FINANCE_ROLE_RE.finditer(text or ""):
         role = _canon_role(m.group(1))
         if role in seen:
             continue
-        if careers_page or HIRING_RE.search(_sentence_context(text, m.start(), m.end())):
+        if listing:
+            ok = True
+        elif careers_page:
+            near = text[max(0, m.start() - _CAREERS_WINDOW): m.end() + _CAREERS_WINDOW]
+            ok = bool(CAREERS_CONTEXT_RE.search(near))
+        else:
+            ok = bool(HIRING_RE.search(_sentence_context(text, m.start(), m.end())))
+        if ok:
             seen.add(role)
             out.append({"role": role, "snippet": _snippet(text, m.start(), m.end())})
         if len(out) >= 4:
@@ -297,7 +315,7 @@ def search_hiring_hits(results, co_word: str) -> list[dict]:
         blob = f"{r.title} {r.snippet}"
         if co_word and co_word not in f"{blob} {r.url}".lower():
             continue
-        for h in find_hiring(blob, careers_page=True):
+        for h in find_hiring(blob, listing=True):
             key = (h["role"], r.url)
             if key not in seen:
                 seen.add(key)

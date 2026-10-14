@@ -98,6 +98,13 @@ def show(d):
     for p in d.research_log.get("own_site_pages", []):
         tag = "careers" if p.get("careers_page") else "page"
         print(f"  {'read' if p['ok'] else 'skip'} {tag:7} {p['url']}  {p['reason']}")
+    u = d.research_log.get("usage") or {}
+    if u:
+        print(f"--- MODEL USE --- {len(u.get('calls', []))} calls, {u.get('input_tokens', 0):,} input + "
+              f"{u.get('output_tokens', 0):,} output tokens, {u.get('web_searches', 0)} web searches, "
+              f"{u.get('brave_searches')} Brave searches")
+        for c in u.get("calls", []):
+            print(f"  {c['call']:24} {c['input_tokens']:>7,} in {c['output_tokens']:>6,} out")
     for w in d.warnings:
         print("  WARNING:", w)
 
