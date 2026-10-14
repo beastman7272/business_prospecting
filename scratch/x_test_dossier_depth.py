@@ -602,6 +602,22 @@ def main():
     check("job search opens the business's own job board, not aggregators or other employers",
           fs.employer_job_pages(jobs, "glow", "glowstudio.example.com", limit=3)
           == [S + "careers", "https://careers.hireology.com/glowstudio"])
+    from fetch_and_extract import PageFetcher, _www_alternate
+    check("www/bare alternates; other subdomains left alone",
+          _www_alternate("https://www.blueprintsmiles.com/a") == "https://blueprintsmiles.com/a"
+          and _www_alternate("https://blueprintsmiles.com/") == "https://www.blueprintsmiles.com/"
+          and _www_alternate("https://shop.x.com/") is None)
+    pf, tried = PageFetcher(), []
+
+    def _once(u):
+        tried.append(u)
+        return (FetchResult(url=u, error="ssl_error") if "//www." in u
+                else FetchResult(url=u, ok=True, final_url=u, text="Our growing team"))
+    pf._fetch_once = _once
+    got = pf.fetch("https://www.blueprintsmiles.com/")
+    check("certificate mismatch on www.X retries X (Blueprint Smiles)",
+          got.ok and got.final_url == "https://blueprintsmiles.com/"
+          and tried == ["https://www.blueprintsmiles.com/", "https://blueprintsmiles.com/"])
     check("a page with nothing to report returns None",
           fs.finance_signal_check(EmptyFR(), "https://x.com/") is None)
     check("merge with nothing found returns None", fs.merge_signals([], []) is None)

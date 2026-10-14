@@ -59,8 +59,31 @@ def _link_priority(link: dict) -> int:
     return 1 if any(slug in blob for slug in HIGH_VALUE_SLUGS) else 0
 
 
-def scrape_website(url: str) -> str:
+# Plain-English reasons a site couldn't be read (shown in the Summary).
+_READ_FAILURES = {
+    "ssl_error": "its security certificate doesn't match the address",
+    "connection_error": "the site didn't respond",
+    "timeout": "the site took too long to respond",
+    "robots_disallowed": "the site asks automated tools not to read it (robots.txt)",
+    "too_many_redirects": "the address redirects in a loop",
+}
+
+
+def _read_failure(fr) -> str:
+    code = fr.error or fr.skipped_reason or "no readable text"
+    if code.startswith("http_"):
+        return f"the site returned an error ({code[5:]})"
+    if code.startswith("non_text_content"):
+        return "the address isn't a web page"
+    return _READ_FAILURES.get(code, code)
+
+
+def scrape_website(url: str, failure: list | None = None) -> str:
+    """Text of the homepage and its most useful pages. On failure returns ""
+    and, if ``failure`` is given, appends a plain-English reason to it."""
     if not url:
+        if failure is not None:
+            failure.append("no website on file")
         return ""
     from fetch_and_extract import PageFetcher
     fetcher = PageFetcher()
@@ -69,6 +92,8 @@ def scrape_website(url: str) -> str:
     if not (home.ok and home.text):
         current_app.logger.warning(
             f"Scrape failed for {url}: {home.error or home.skipped_reason}")
+        if failure is not None:
+            failure.append(_read_failure(home))
         return ""
     host = urlparse(home.final_url or url).netloc.lower().removeprefix("www.")
 
@@ -110,8 +135,24 @@ def _seller_note() -> str:
         return ""
 
 
-def extract_intel(name: str, address: str, raw_text: str) -> dict:
+def extract_intel(name: str, address: str, raw_text: str, read_failure: str = "") -> dict:
     client = OpenAI(api_key=current_app.config["OPENAI_API_KEY"])
+    if raw_text:
+        content = raw_text
+    else:
+        # Without the site, the model used to guess ("If this is an owner-run
+        # dental practice...") for a 7-practice dental group. Say plainly that
+        # the site wasn't read, and don't guess the seller-facing fields.
+        content = (
+            "[The website could not be read"
+            + (f": {read_failure}" if read_failure else "") + ".]\n"
+            "Start company_summary with \"Website not read ("
+            + (read_failure or "no content") + ").\" and then say only what the "
+            "name and address support. Set potential_pain_points and "
+            "outreach_angle to \"Unknown -- the website couldn't be read; "
+            "re-run Enrich once it can be.\" Set key_contacts to \"Unknown\". "
+            "Do not guess the business's size, structure or needs."
+        )
 
     prompt = f"""
 You are a B2B sales researcher. Given the following scraped website content for a business,
@@ -120,7 +161,7 @@ extract structured intelligence useful for a sales rep.
 Business Name: {name}
 Address: {address}
 Website Content (several pages, each starting with [Page: url]):
-{raw_text if raw_text else "[No website content available — infer from business name/address only]"}
+{content}
 
 For key_contacts, list the people the pages name with their titles, most senior or
 most relevant to the seller first (up to 10), e.g. "Jane Doe (General Manager);
@@ -165,8 +206,10 @@ def enrich_business(business) -> dict:
     Top-level function called by the API route.
     Accepts a Business model instance, returns intel dict.
     """
-    raw_text = scrape_website(business.website)
-    intel = extract_intel(business.name, business.formatted_address, raw_text)
+    failure: list[str] = []
+    raw_text = scrape_website(business.website, failure)
+    intel = extract_intel(business.name, business.formatted_address, raw_text,
+                          read_failure=failure[0] if failure else "")
 
     if not isinstance(intel, dict):
         current_app.logger.warning(f"extract_intel returned non-dict for {business.name}")

@@ -429,6 +429,22 @@ def extract_main_text(html: str) -> tuple[str | None, str]:
 # Fetcher
 # -----------------------------------------------------------------------------
 
+def _www_alternate(url: str) -> str | None:
+    """https://www.x.com/a -> https://x.com/a and back; None for other hosts
+    (subdomains like shop.x.com are left alone)."""
+    p = urlparse(url)
+    host = p.netloc
+    if not host:
+        return None
+    if host.lower().startswith("www."):
+        alt = host[4:]
+    elif host.count(".") == 1:
+        alt = "www." + host
+    else:
+        return None
+    return p._replace(netloc=alt).geturl()
+
+
 def _normalize_url(url: str) -> str:
     """Lowercase scheme/host and drop the fragment, for dedupe and caching."""
     p = urlparse(url)
@@ -516,7 +532,25 @@ class PageFetcher:
     # --- fetching -----------------------------------------------------------
 
     def fetch(self, url: str) -> FetchResult:
-        """Fetch one URL, applying all policy. Never raises on expected errors."""
+        """Fetch one URL, applying all policy. Never raises on expected errors.
+
+        If the certificate doesn't match the host and the host is www.X (or
+        X), retries once on the other form. Google Places gave
+        www.blueprintsmiles.com, whose certificate only covers
+        blueprintsmiles.com -- every read failed though the bare address
+        works in a browser. Certificates are still verified on the retry."""
+        result = self._fetch_once(url)
+        if result.error == "ssl_error":
+            alt = _www_alternate(url)
+            if alt:
+                retry = self._fetch_once(alt)
+                if retry.ok:
+                    retry.url = url              # what we were asked for
+                    retry.final_url = retry.final_url or alt
+                    return retry
+        return result
+
+    def _fetch_once(self, url: str) -> FetchResult:
         result = FetchResult(url=url)
 
         p = urlparse(url)
@@ -550,6 +584,9 @@ class PageFetcher:
             return result
         except requests.exceptions.TooManyRedirects:
             result.error = "too_many_redirects"
+            return result
+        except requests.exceptions.SSLError:     # before ConnectionError (subclass)
+            result.error = "ssl_error"
             return result
         except requests.exceptions.ConnectionError:
             result.error = "connection_error"
