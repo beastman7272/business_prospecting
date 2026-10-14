@@ -106,7 +106,16 @@ CAREERS_LINK_WORDS = ("career", "jobs", "job-", "/job", "hiring", "join our team
                       "work-with-us", "openings", "opportunities", "apply")
 ATS_HOSTS = ("applytojob.com", "bamboohr.com", "workable.com", "paylocity.com",
              "jobs.lever.co", "greenhouse.io", "indeed.com", "ziprecruiter.com",
-             "breezy.hr", "jazzhr.com", "recruitee.com", "gusto.com", "adp.com")
+             "breezy.hr", "jazzhr.com", "recruitee.com", "gusto.com", "adp.com",
+             # Dealership and multi-location employers (Gwinnett Place Nissan
+             # lists its jobs at careers.hireology.com/gwinnettplacenissan).
+             "hireology.com", "paycomonline.net", "ultipro.com", "ukg.com",
+             "icims.com", "dayforcehcm.com", "myworkdayjobs.com", "applicantpro.com",
+             "harri.com", "workstream.us")
+# Hosts whose pages list ONE employer's openings (worth opening from a job
+# search). Aggregators like Indeed/ZipRecruiter mix employers and are judged
+# on their snippets only.
+EMPLOYER_JOB_HOSTS = tuple(h for h in ATS_HOSTS if h not in ("indeed.com", "ziprecruiter.com"))
 CAREERS_PAGE_WORDS = ("career", "job", "hiring", "employment", "join", "opening",
                       "position", "apply")
 
@@ -295,6 +304,30 @@ def search_hiring_hits(results, co_word: str) -> list[dict]:
                 out.append({"role": h["role"], "snippet": f"{r.title} — {r.snippet}"[:240],
                             "url": r.url, "source": "search"})
     return out[:5]
+
+
+def employer_job_pages(results, co_word: str, own_domain: str = "", limit: int = 1) -> list[str]:
+    """Job-search results that are the business's own job board (its careers
+    page or an applicant-tracking page naming it), worth opening because
+    titles and snippets rarely list every role."""
+    from urllib.parse import urlparse
+    out = []
+    for r in results or []:
+        host = (urlparse(r.url).netloc or "").lower()
+        if host.startswith("www."):
+            host = host[4:]
+        own = own_domain and (host == own_domain or host.endswith("." + own_domain))
+        ats = any(host == h or host.endswith("." + h) for h in EMPLOYER_JOB_HOSTS)
+        if not (own or ats):
+            continue
+        if ats and co_word and co_word not in f"{r.title} {r.snippet} {r.url}".lower():
+            continue
+        if own and not is_careers_page(r.url, r.title):
+            continue
+        out.append(r.url)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def merge_signals(page_entries: list[dict], search_hits: list[dict] | None = None,

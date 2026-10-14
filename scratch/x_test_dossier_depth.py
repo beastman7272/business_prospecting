@@ -595,6 +595,13 @@ def main():
               for t in search_terms(rr.role.key)]
     check("a dealership Controller clears the accountant's seniority bar",
           _seniority_score("Controller", titles) >= 1)
+    jobs = [SearchResult("Careers | Glow Studio", S + "careers", "", "q"),
+            SearchResult("Jobs for Glow Studio", "https://careers.hireology.com/glowstudio", "", "q"),
+            SearchResult("Glow Studio Jobs | Indeed", "https://www.indeed.com/q-glow-studio-jobs.html", "", "q"),
+            SearchResult("Jobs for Other Spa", "https://careers.hireology.com/otherspa", "", "q")]
+    check("job search opens the business's own job board, not aggregators or other employers",
+          fs.employer_job_pages(jobs, "glow", "glowstudio.example.com", limit=3)
+          == [S + "careers", "https://careers.hireology.com/glowstudio"])
     check("a page with nothing to report returns None",
           fs.finance_signal_check(EmptyFR(), "https://x.com/") is None)
     check("merge with nothing found returns None", fs.merge_signals([], []) is None)

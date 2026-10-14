@@ -1062,7 +1062,24 @@ def collect_evidence(
         except Exception as ex:
             batch, err = [], str(ex)
             warnings.append(f"search failed (hiring_signal): {ex}")
-        hits = finance_signals.search_hiring_hits(batch, co_words[0] if co_words else "")
+        co_word = co_words[0] if co_words else ""
+        hits = finance_signals.search_hiring_hits(batch, co_word)
+        # Open the business's own job board if the search found it and the
+        # crawl didn't already read it (listings are rarely in the snippet).
+        checked = {_norm_url(p["url"]) for p in crawl_log}
+        for jurl in finance_signals.employer_job_pages(
+                batch, co_word, normalize_domain(company.domain) or "", limit=2):
+            if _norm_url(jurl) in checked:
+                continue
+            fr = get_page(jurl)
+            entry = {"url": jurl, "ok": bool(fr.ok and fr.text), "careers_page": True,
+                     "via": "job_search", "reason": fr.skipped_reason or fr.error or ""}
+            crawl_log.append(entry)
+            if fr.ok and fr.text:
+                fin = finance_signals.finance_signal_check(fr, jurl, careers_page=True)
+                if fin:
+                    entry[finance_signals.SIGNAL] = fin
+            break
         if hits:
             signal_hits["hiring"] = hits
         query_log.append({"engine": search_engine_name, "purpose": "hiring_signal",
